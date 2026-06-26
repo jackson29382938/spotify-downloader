@@ -1,0 +1,7 @@
+downloads/
+state/
+.build/
+dist/
+*.pyc
+__pycache__/
+.venv/
