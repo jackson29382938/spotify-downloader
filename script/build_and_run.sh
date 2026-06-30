@@ -20,19 +20,42 @@ INFO_PLIST="$APP_CONTENTS/Info.plist"
 PACKAGE_ZIP="$DIST_DIR/Spotify Downloader Portable.zip"
 PORTABLE_BUILD_DIR="$ROOT_DIR/.build/portable-downloader"
 PORTABLE_DOWNLOADER="$PORTABLE_BUILD_DIR/spotify_dl"
+PYTHON_BOOTSTRAP="${PYTHON_BOOTSTRAP:-python3}"
+PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 
 cd "$ROOT_DIR"
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
+ensure_python_env() {
+  if [[ ! -x "$PYTHON_BIN" ]]; then
+    echo "Creating local Python environment..."
+    rm -rf "$ROOT_DIR/.venv"
+    "$PYTHON_BOOTSTRAP" -m venv "$ROOT_DIR/.venv"
+  fi
+
+  if ! "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
+import PyInstaller  # noqa: F401
+import mutagen  # noqa: F401
+import requests  # noqa: F401
+import yt_dlp  # noqa: F401
+PY
+  then
+    echo "Installing downloader packaging dependencies..."
+    "$PYTHON_BIN" -m pip install --upgrade pip
+    "$PYTHON_BIN" -m pip install -r "$ROOT_DIR/requirements.txt" pyinstaller
+  fi
+}
+
 swift build
 BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
 
 if [[ ! -x "$PORTABLE_DOWNLOADER" || "$ROOT_DIR/spotify_dl.py" -nt "$PORTABLE_DOWNLOADER" ]]; then
+  ensure_python_env
   echo "Packaging standalone downloader..."
   rm -rf "$PORTABLE_BUILD_DIR"
   mkdir -p "$PORTABLE_BUILD_DIR"
-  python3 -m PyInstaller \
+  "$PYTHON_BIN" -m PyInstaller \
     --clean \
     --onefile \
     --name spotify_dl \
@@ -102,6 +125,11 @@ cat >"$INFO_PLIST" <<PLIST
 </dict>
 </plist>
 PLIST
+
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null
+  codesign --verify --deep --strict "$APP_BUNDLE"
+fi
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
