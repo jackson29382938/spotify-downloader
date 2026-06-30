@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Spotify Downloader">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1ed760"/>
+      <stop offset="100%" stop-color="#169c46"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="28" fill="url(#bg)"/>
+  <path fill="#ffffff" d="M64 30 L64 58 M52 46 L64 58 L76 46"/>
+  <path fill="none" stroke="#ffffff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"
+        d="M64 30 L64 58 M52 46 L64 58 L76 46"/>
+  <path fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round"
+        d="M42 78 C50 70 58 70 64 78 C70 86 78 86 86 78"/>
+  <path fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" opacity="0.85"
+        d="M38 92 C48 82 56 82 64 92 C72 102 80 102 90 92"/>
+</svg>

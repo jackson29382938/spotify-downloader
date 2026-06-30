@@ -13,6 +13,7 @@ APP_BUNDLE="$DIST_DIR/$BUNDLE_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
+APP_ICON="$ROOT_DIR/Resources/AppIcon.icns"
 APP_DOWNLOADER="$APP_RESOURCES/downloader"
 APP_RESOURCE_BIN="$APP_RESOURCES/bin"
 APP_BINARY="$APP_MACOS/$APP_NAME"
@@ -50,6 +51,13 @@ PY
 swift build
 BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
 
+ensure_python_env
+
+if [[ ! -f "$APP_ICON" || "$ROOT_DIR/script/generate_app_icon.py" -nt "$APP_ICON" || "$ROOT_DIR/Resources/logo.svg" -nt "$APP_ICON" ]]; then
+  echo "Generating app icon..."
+  "$PYTHON_BIN" "$ROOT_DIR/script/generate_app_icon.py"
+fi
+
 if [[ ! -x "$PORTABLE_DOWNLOADER" || "$ROOT_DIR/spotify_dl.py" -nt "$PORTABLE_DOWNLOADER" ]]; then
   ensure_python_env
   echo "Packaging standalone downloader..."
@@ -75,6 +83,10 @@ cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
 cp "$PORTABLE_DOWNLOADER" "$APP_DOWNLOADER/spotify_dl"
 chmod +x "$APP_DOWNLOADER/spotify_dl"
+
+if [[ -f "$APP_ICON" ]]; then
+  cp "$APP_ICON" "$APP_RESOURCES/AppIcon.icns"
+fi
 
 FFMPEG_SOURCE="${FFMPEG_PATH:-}"
 if [[ -z "$FFMPEG_SOURCE" || ! -x "$FFMPEG_SOURCE" ]]; then
@@ -110,6 +122,8 @@ cat >"$INFO_PLIST" <<PLIST
   <string>Spotify Downloader</string>
   <key>CFBundleDisplayName</key>
   <string>Spotify Downloader</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>LSMinimumSystemVersion</key>

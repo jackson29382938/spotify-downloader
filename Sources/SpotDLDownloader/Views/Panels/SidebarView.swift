@@ -70,6 +70,13 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .safeAreaInset(edge: .top) {
+            AppLogoLockup(logoSize: 32)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+        }
         .navigationTitle("Media DL")
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 8) {
