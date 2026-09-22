@@ -32,6 +32,12 @@ full ledger and [NOTICE.md](NOTICE.md) for attribution.
   force another round of per-track Spotify lookups on the next run.
 - Preview-before-download, a native queue/detail view, retry failed items,
   diagnostics copy, helper health checks, and download history.
+- Optional automatic import of completed MP3, M4A, and WAV downloads into a
+  newly created Apple Music playlist.
+- In-progress **Pause & Keep Completed** and **Cancel & Delete Completed**
+  controls. Paused playlist downloads resume without re-downloading completed tracks.
+- Configurable failed-track retries (two additional attempts by default), with
+  a different search route, YouTube client, and audio-stream preference each time.
 
 ## Mac App
 
@@ -169,6 +175,9 @@ python3 spotify_dl.py download --allow-closest-match <spotify-url>
 
 # Write verbose diagnostics to the rotating log
 python3 spotify_dl.py download --debug-log <spotify-url>
+
+# Make up to four additional attempts for failed tracks
+python3 spotify_dl.py download --retries 4 <spotify-url>
 
 # Emit newline-delimited JSON progress events while still preserving CLI behavior
 python3 spotify_dl.py download --json-events <spotify-url>

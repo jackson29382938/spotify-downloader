@@ -16,6 +16,9 @@ struct SettingsView: View {
     @AppStorage("artworkJpeg") private var artworkJpeg = false
     @AppStorage("debugLogging") private var debugLogging = false
     @AppStorage("showDetailedActivity") private var showDetailedActivity = false
+    @AppStorage("addToAppleMusic") private var addToAppleMusic = false
+    @AppStorage("appleMusicPlaylistName") private var appleMusicPlaylistName = Defaults.appleMusicPlaylistName
+    @AppStorage("downloadRetries") private var downloadRetries = 2
 
     var body: some View {
         Form {
@@ -40,6 +43,15 @@ struct SettingsView: View {
                 ) {
                     Stepper(value: $downloadThreads, in: 1...16) {
                         Text("\(max(1, downloadThreads)) concurrent downloads")
+                    }
+                }
+
+                SettingHelpRow(
+                    title: "Failed-track retries",
+                    help: "Additional attempts after the first failure. Each retry uses a different YouTube search and download method."
+                ) {
+                    Stepper(value: $downloadRetries, in: 0...5) {
+                        Text("\(max(0, downloadRetries)) additional retr\(downloadRetries == 1 ? "y" : "ies")")
                     }
                 }
             }
@@ -119,6 +131,24 @@ struct SettingsView: View {
                         }
                         Toggle("Convert cover art to JPEG", isOn: $artworkJpeg)
                             .toggleStyle(.checkbox)
+                    }
+                }
+
+                SettingHelpRow(
+                    title: "Apple Music playlist",
+                    help: "Creates a new playlist after each audio download and adds the completed MP3, M4A, or WAV files. Repeated names get a number suffix. macOS will ask for permission the first time."
+                ) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle("Add downloads to a new playlist", isOn: $addToAppleMusic)
+                            .toggleStyle(.checkbox)
+                        TextField("Playlist name", text: $appleMusicPlaylistName)
+                            .disabled(!addToAppleMusic)
+                        if addToAppleMusic,
+                           !(AudioFormat(rawValue: audioFormat) ?? .mp3).canImportIntoAppleMusic {
+                            Label("Choose MP3, M4A, or WAV to use Apple Music import.", systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
                     }
                 }
 

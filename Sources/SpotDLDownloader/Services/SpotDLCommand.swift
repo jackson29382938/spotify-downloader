@@ -16,6 +16,7 @@ struct DownloadCommand {
     var artworkMaxSize: ArtworkMaxSize
     var artworkJpeg: Bool
     var debugLogging: Bool
+    var retries: Int
 
     var displayString: String {
         arguments.map { value in
@@ -31,6 +32,7 @@ struct DownloadCommand {
             "--format", format.rawValue,
             "--bitrate", bitrate.rawValue,
             "--overwrite", overwrite.rawValue,
+            "--retries", "\(min(5, max(0, retries)))",
             "--output-dir", URL(fileURLWithPath: outputFolder).standardizedFileURL.path,
             "--json-events"
         ]

@@ -136,6 +136,8 @@ cat >"$INFO_PLIST" <<PLIST
   <string>Spotify Downloader can save downloaded music to folders you choose.</string>
   <key>NSDesktopFolderUsageDescription</key>
   <string>Spotify Downloader can save downloaded music to folders you choose.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Spotify Downloader can add completed audio files to a new playlist in Apple Music.</string>
 </dict>
 </plist>
 PLIST

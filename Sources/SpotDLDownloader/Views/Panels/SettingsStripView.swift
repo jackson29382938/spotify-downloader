@@ -12,6 +12,9 @@ struct SettingsStripView: View {
     @AppStorage("writeLRC") private var writeLRC = true
     @AppStorage("cookiesBrowser") private var cookiesBrowser = CookiesBrowser.none.rawValue
     @AppStorage("debugLogging") private var debugLogging = false
+    @AppStorage("addToAppleMusic") private var addToAppleMusic = false
+    @AppStorage("appleMusicPlaylistName") private var appleMusicPlaylistName = Defaults.appleMusicPlaylistName
+    @AppStorage("downloadRetries") private var downloadRetries = 2
 
     private var selectedMediaKind: MediaKind {
         MediaKind(rawValue: mediaKind) ?? .audio
@@ -19,6 +22,10 @@ struct SettingsStripView: View {
 
     private var selectedCookiesBrowser: CookiesBrowser {
         CookiesBrowser(rawValue: cookiesBrowser) ?? .none
+    }
+
+    private var selectedAudioFormat: AudioFormat {
+        AudioFormat(rawValue: audioFormat) ?? .mp3
     }
 
     private var selectedOverwrite: ExistingFileBehavior {
@@ -60,6 +67,14 @@ struct SettingsStripView: View {
                                 .monospacedDigit()
                         }
                         .frame(width: 120)
+                    }
+
+                    SettingBlock("Retries", help: "Additional attempts for failed tracks. Each attempt changes the search and YouTube download method.") {
+                        Stepper(value: $downloadRetries, in: 0...5) {
+                            Text("\(max(0, downloadRetries)) extra")
+                                .monospacedDigit()
+                        }
+                        .frame(width: 130)
                     }
 
                     if selectedMediaKind == .audio {
@@ -139,12 +154,32 @@ struct SettingsStripView: View {
                             .toggleStyle(.checkbox)
                             .fixedSize()
                     }
+
+                    if selectedMediaKind == .audio {
+                        SettingBlock("Apple Music", help: "After each download, creates a new playlist in Music. Repeated names get a number suffix.") {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Toggle("Add to new playlist", isOn: $addToAppleMusic)
+                                    .toggleStyle(.checkbox)
+                                    .fixedSize()
+                                TextField("Playlist name", text: $appleMusicPlaylistName)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 180)
+                                    .disabled(!addToAppleMusic)
+                            }
+                        }
+                    }
                 }
 
                 if selectedCookiesBrowser != .none {
                     Label("Cookies: \(selectedCookiesBrowser.label)", systemImage: "lock.shield")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+
+                if selectedMediaKind == .audio, addToAppleMusic, !selectedAudioFormat.canImportIntoAppleMusic {
+                    Label("Apple Music import requires MP3, M4A, or WAV.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
                 }
             }
         }

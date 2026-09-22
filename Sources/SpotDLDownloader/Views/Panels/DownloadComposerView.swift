@@ -17,6 +17,10 @@ struct DownloadComposerView: View {
     @AppStorage("artworkMaxSize") private var artworkMaxSize = ArtworkMaxSize.unlimited.rawValue
     @AppStorage("artworkJpeg") private var artworkJpeg = false
     @AppStorage("debugLogging") private var debugLogging = false
+    @AppStorage("addToAppleMusic") private var addToAppleMusic = false
+    @AppStorage("appleMusicPlaylistName") private var appleMusicPlaylistName = Defaults.appleMusicPlaylistName
+    @AppStorage("downloadRetries") private var downloadRetries = 2
+    @State private var confirmDeleteCompleted = false
 
     private var selectedMediaKind: MediaKind {
         MediaKind(rawValue: mediaKind) ?? .audio
@@ -81,17 +85,50 @@ struct DownloadComposerView: View {
                         .font(.callout)
                         .foregroundStyle(.orange)
                 }
+
+                if let appleMusicMessage = viewModel.appleMusicMessage {
+                    Label(
+                        appleMusicMessage,
+                        systemImage: viewModel.appleMusicMessageIsError ? "exclamationmark.triangle.fill" : "music.note.list"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(viewModel.appleMusicMessageIsError ? .orange : .secondary)
+                }
             }
+        }
+        .confirmationDialog(
+            "Cancel this download and delete completed files?",
+            isPresented: $confirmDeleteCompleted,
+            titleVisibility: .visible
+        ) {
+            Button("Cancel & Delete Completed", role: .destructive) {
+                viewModel.cancelAndDeleteCompleted()
+            }
+            Button("Keep Downloading", role: .cancel) {}
+        } message: {
+            Text("Only files completed during this run will be deleted. Files that existed before this download will be kept.")
         }
     }
 
     private var actionButtons: some View {
         HStack(spacing: 10) {
-            if viewModel.status.isRunning {
-                Button(role: .destructive) {
-                    viewModel.cancelDownload()
+            if viewModel.isDownloadRunning {
+                Menu {
+                    Button {
+                        viewModel.pauseAndKeepCompleted()
+                    } label: {
+                        Label("Pause & Keep Completed", systemImage: "pause.fill")
+                    }
+
+                    Divider()
+
+                    Button(role: .destructive) {
+                        confirmDeleteCompleted = true
+                    } label: {
+                        Label("Cancel & Delete Completed", systemImage: "trash")
+                    }
                 } label: {
-                    Label("Cancel", systemImage: "stop.fill")
+                    Label("Pause / Cancel", systemImage: "pause.circle")
                 }
             }
 
@@ -120,7 +157,10 @@ struct DownloadComposerView: View {
                     cookiesBrowser: selectedCookiesBrowser,
                     artworkMaxSize: selectedArtworkMaxSize,
                     artworkJpeg: artworkJpeg,
-                    debugLogging: debugLogging
+                    debugLogging: debugLogging,
+                    addToAppleMusic: addToAppleMusic,
+                    appleMusicPlaylistName: appleMusicPlaylistName,
+                    retries: downloadRetries
                 )
             } label: {
                 Label("Retry Failed", systemImage: "arrow.clockwise")
@@ -142,10 +182,16 @@ struct DownloadComposerView: View {
                     cookiesBrowser: selectedCookiesBrowser,
                     artworkMaxSize: selectedArtworkMaxSize,
                     artworkJpeg: artworkJpeg,
-                    debugLogging: debugLogging
+                    debugLogging: debugLogging,
+                    addToAppleMusic: addToAppleMusic,
+                    appleMusicPlaylistName: appleMusicPlaylistName,
+                    retries: downloadRetries
                 )
             } label: {
-                Label("Download", systemImage: "arrow.down.circle.fill")
+                Label(
+                    viewModel.isPaused ? "Resume" : "Download",
+                    systemImage: viewModel.isPaused ? "play.circle.fill" : "arrow.down.circle.fill"
+                )
             }
             .buttonStyle(.borderedProminent)
             .disabled(!viewModel.canDownload)

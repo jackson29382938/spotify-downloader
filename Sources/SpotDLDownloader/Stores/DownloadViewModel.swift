@@ -3,6 +3,12 @@ import Foundation
 
 @MainActor
 final class DownloadViewModel: ObservableObject {
+    private enum DownloadStopAction {
+        case none
+        case pauseKeepCompleted
+        case cancelDeleteCompleted
+    }
+
     @Published var linkText: String = Defaults.testTrackURL
     @Published var status: DownloadStatus = .idle
     @Published var logText: String = ""
@@ -18,18 +24,37 @@ final class DownloadViewModel: ObservableObject {
     @Published var historyEntries: [HistoryEntry] = []
     @Published var isInstallingFFmpeg = false
     @Published var ffmpegInstallStatus: String?
+    @Published var appleMusicMessage: String?
+    @Published var appleMusicMessageIsError = false
+    @Published var isAddingToAppleMusic = false
 
     private let service = DownloadService()
+    private let appleMusicService = AppleMusicService()
     private var cancelledByUser = false
+    private var downloadStopAction = DownloadStopAction.none
     private var activeDownloadURLs = Set<String>()
+    private var activeOutputFolder = ""
+    private var activeDownloadStartedAt: Date?
     private var outputLineBuffer = ""
 
+    var isDownloadRunning: Bool {
+        if case .running = status { return true }
+        return false
+    }
+
+    var isPaused: Bool {
+        if case .paused = status { return true }
+        return false
+    }
+
     var canDownload: Bool {
-        !status.isRunning && (queueItems.contains { $0.state != .failed } || parsedQueries.isEmpty == false)
+        !status.isRunning
+            && !isAddingToAppleMusic
+            && (queueItems.contains { $0.state != .failed } || parsedQueries.isEmpty == false)
     }
 
     var canRetryFailed: Bool {
-        !status.isRunning && queueItems.contains { $0.state == .failed }
+        !status.isRunning && !isAddingToAppleMusic && queueItems.contains { $0.state == .failed }
     }
 
     var canRepairLibrary: Bool {
@@ -137,10 +162,14 @@ final class DownloadViewModel: ObservableObject {
         artworkMaxSize: ArtworkMaxSize,
         artworkJpeg: Bool,
         debugLogging: Bool,
+        addToAppleMusic: Bool,
+        appleMusicPlaylistName: String,
+        retries: Int,
         queriesOverride: [String]? = nil
     ) {
+        let runnableQueueURLs = queueItems.filter { $0.state != .failed }.map(\.url)
         let queries = queriesOverride
-            ?? (queueItems.isEmpty ? parsedQueries : queueItems.filter { $0.state != .failed }.map(\.url))
+            ?? (runnableQueueURLs.isEmpty ? parsedQueries : runnableQueueURLs)
         guard queries.isEmpty == false else {
             errorMessage = "Paste at least one Spotify or YouTube link."
             return
@@ -168,13 +197,19 @@ final class DownloadViewModel: ObservableObject {
             cookiesBrowser: cookiesBrowser,
             artworkMaxSize: artworkMaxSize,
             artworkJpeg: artworkJpeg,
-            debugLogging: debugLogging
+            debugLogging: debugLogging,
+            retries: retries
         )
 
         cancelledByUser = false
+        downloadStopAction = .none
         activeDownloadURLs = Set(queries)
+        activeOutputFolder = URL(fileURLWithPath: outputFolder).standardizedFileURL.path
+        activeDownloadStartedAt = Date()
         outputLineBuffer = ""
         errorMessage = nil
+        appleMusicMessage = nil
+        appleMusicMessageIsError = false
         logText = ""
         progressItems = []
         progressSummary = DownloadProgressSummary(title: "Starting", total: queries.count)
@@ -195,22 +230,46 @@ final class DownloadViewModel: ObservableObject {
                     DispatchQueue.main.async {
                         guard let self else { return }
                         self.flushOutputBuffer()
-                        if self.cancelledByUser {
+                        switch self.downloadStopAction {
+                        case .pauseKeepCompleted:
+                            self.status = .paused
+                            self.updateQueueItems(
+                                for: self.activeDownloadURLs,
+                                state: .queued,
+                                message: "Paused — press Download to resume"
+                            )
+                            self.finishRunningProgressItems(as: .paused, message: "Paused")
+                        case .cancelDeleteCompleted:
+                            let deletion = self.deleteCompletedFilesFromActiveRun()
                             self.status = .cancelled
-                            self.updateQueueItems(for: self.activeDownloadURLs, state: .failed, message: "Cancelled")
+                            let deletionMessage = deletion.failed == 0
+                                ? "Cancelled · deleted \(deletion.deleted) completed file\(deletion.deleted == 1 ? "" : "s")"
+                                : "Cancelled · deleted \(deletion.deleted), could not delete \(deletion.failed)"
+                            self.updateQueueItems(for: self.activeDownloadURLs, state: .failed, message: deletionMessage)
                             self.finishRunningProgressItems(as: .cancelled, message: "Cancelled")
-                        } else if code == 0 {
-                            self.status = .succeeded
-                            self.updateQueueItems(for: self.activeDownloadURLs, state: .succeeded, message: "Complete")
-                            self.recalculateProgressSummary()
-                            self.loadHistory()
-                        } else {
-                            self.status = .failed(code: code)
-                            self.errorMessage = "The downloader exited with code \(code)."
-                            self.updateQueueItems(for: self.activeDownloadURLs, state: .failed, message: "Exit \(code)")
-                            self.finishRunningProgressItems(as: .failed, message: "Exit \(code)")
+                            if deletion.failed > 0 {
+                                self.errorMessage = "Some completed files could not be deleted. Check the activity log for details."
+                            }
+                        case .none:
+                            if code == 0 {
+                                self.status = .succeeded
+                                self.updateQueueItems(for: self.activeDownloadURLs, state: .succeeded, message: "Complete")
+                                self.recalculateProgressSummary()
+                                self.loadHistory()
+                            } else {
+                                self.status = .failed(code: code)
+                                self.errorMessage = "The downloader exited with code \(code)."
+                                self.updateQueueItems(for: self.activeDownloadURLs, state: .failed, message: "Exit \(code)")
+                                self.finishRunningProgressItems(as: .failed, message: "Exit \(code)")
+                            }
+                        }
+                        if self.downloadStopAction == .none, addToAppleMusic, mediaKind == .audio {
+                            self.addCompletedFilesToAppleMusic(playlistBaseName: appleMusicPlaylistName)
                         }
                         self.activeDownloadURLs.removeAll()
+                        self.activeOutputFolder = ""
+                        self.activeDownloadStartedAt = nil
+                        self.downloadStopAction = .none
                     }
                 }
             )
@@ -237,7 +296,10 @@ final class DownloadViewModel: ObservableObject {
         cookiesBrowser: CookiesBrowser,
         artworkMaxSize: ArtworkMaxSize,
         artworkJpeg: Bool,
-        debugLogging: Bool
+        debugLogging: Bool,
+        addToAppleMusic: Bool,
+        appleMusicPlaylistName: String,
+        retries: Int
     ) {
         let failedURLs = queueItems.filter { $0.state == .failed }.map(\.url)
         guard failedURLs.isEmpty == false else { return }
@@ -256,8 +318,39 @@ final class DownloadViewModel: ObservableObject {
             artworkMaxSize: artworkMaxSize,
             artworkJpeg: artworkJpeg,
             debugLogging: debugLogging,
+            addToAppleMusic: addToAppleMusic,
+            appleMusicPlaylistName: appleMusicPlaylistName,
+            retries: retries,
             queriesOverride: failedURLs
         )
+    }
+
+    private func addCompletedFilesToAppleMusic(playlistBaseName: String) {
+        let paths = progressItems.compactMap { item -> String? in
+            guard item.state == .succeeded || item.state == .skipped else { return nil }
+            return item.path
+        }
+        appleMusicMessage = "Adding \(paths.count) track\(paths.count == 1 ? "" : "s") to Apple Music…"
+        appleMusicMessageIsError = false
+        isAddingToAppleMusic = true
+
+        appleMusicService.addToNewPlaylist(filePaths: paths, playlistBaseName: playlistBaseName) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isAddingToAppleMusic = false
+                switch result {
+                case .success(let importResult):
+                    let failureText = importResult.failedCount > 0
+                        ? " · \(importResult.failedCount) could not be added"
+                        : ""
+                    self.appleMusicMessage = "Added \(importResult.addedCount) track\(importResult.addedCount == 1 ? "" : "s") to “\(importResult.playlistName)”\(failureText)."
+                    self.appleMusicMessageIsError = importResult.failedCount > 0
+                case .failure(let error):
+                    self.appleMusicMessage = error.localizedDescription
+                    self.appleMusicMessageIsError = true
+                }
+            }
+        }
     }
 
     func repairLibrary(
@@ -327,9 +420,76 @@ final class DownloadViewModel: ObservableObject {
         }
     }
 
+    func pauseAndKeepCompleted() {
+        guard isDownloadRunning else { return }
+        downloadStopAction = .pauseKeepCompleted
+        service.cancel()
+    }
+
+    func cancelAndDeleteCompleted() {
+        guard isDownloadRunning else { return }
+        downloadStopAction = .cancelDeleteCompleted
+        service.cancel()
+    }
+
     func cancelDownload() {
         cancelledByUser = true
         service.cancel()
+    }
+
+    private func deleteCompletedFilesFromActiveRun() -> (deleted: Int, failed: Int) {
+        let root = URL(fileURLWithPath: activeOutputFolder).standardizedFileURL.path
+        guard root.isEmpty == false else { return (0, 0) }
+        let rootPrefix = root.hasSuffix("/") ? root : root + "/"
+        let allowedExtensions = Set(["mp3", "m4a", "flac", "opus", "ogg", "wav", "mp4", "webm", "mkv"])
+        var deleted = 0
+        var failed = 0
+
+        for index in progressItems.indices where progressItems[index].state == .succeeded {
+            guard let path = progressItems[index].path else { continue }
+            let fileURL = URL(fileURLWithPath: path).standardizedFileURL
+            let standardizedPath = fileURL.path
+            var isDirectory = ObjCBool(false)
+            let exists = FileManager.default.fileExists(atPath: standardizedPath, isDirectory: &isDirectory)
+            let modifiedAt = (try? FileManager.default.attributesOfItem(atPath: standardizedPath)[.modificationDate]) as? Date
+            let wasCreatedThisRun = activeDownloadStartedAt.map { startedAt in
+                modifiedAt.map { $0 >= startedAt.addingTimeInterval(-1) } ?? false
+            } ?? false
+            guard standardizedPath.hasPrefix(rootPrefix),
+                  allowedExtensions.contains(fileURL.pathExtension.lowercased()),
+                  (!exists || !isDirectory.boolValue),
+                  (!exists || wasCreatedThisRun) else {
+                failed += 1
+                appendLog("Kept completed file because it was not verified as a new file from this run: \(standardizedPath)\n")
+                continue
+            }
+
+            do {
+                if exists {
+                    try FileManager.default.removeItem(atPath: standardizedPath)
+                    deleted += 1
+                }
+                progressItems[index].state = .cancelled
+                progressItems[index].message = "Deleted after cancellation"
+                progressItems[index].path = nil
+            } catch {
+                failed += 1
+                appendLog("Could not delete \(standardizedPath): \(error.localizedDescription)\n")
+                continue
+            }
+
+            let lrcPath = fileURL.deletingPathExtension().appendingPathExtension("lrc").path
+            do {
+                if FileManager.default.fileExists(atPath: lrcPath) {
+                    try FileManager.default.removeItem(atPath: lrcPath)
+                }
+            } catch {
+                failed += 1
+                appendLog("Could not delete \(lrcPath): \(error.localizedDescription)\n")
+            }
+        }
+        recalculateProgressSummary()
+        return (deleted, failed)
     }
 
     func loadHistory() {

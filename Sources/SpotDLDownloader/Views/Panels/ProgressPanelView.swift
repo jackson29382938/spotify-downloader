@@ -54,6 +54,9 @@ struct ProgressPanelView: View {
         if viewModel.progressSummary.failed > 0 {
             return .failed
         }
+        if viewModel.isPaused {
+            return .paused
+        }
         if viewModel.status.isRunning {
             return .running
         }

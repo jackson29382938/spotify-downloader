@@ -295,7 +295,8 @@ class TieredSearchTests(unittest.TestCase):
     def test_ytmusic_search_is_tried_first(self):
         track = dl.Track(name="Song", artists="Artist")
         queries = dl.youtube_search_queries(track, limit=5)
-        self.assertTrue(queries[0].startswith("ytmsearch5:"))
+        self.assertTrue(queries[0].startswith("https://music.youtube.com/search?"))
+        self.assertIn("Artist+-+Song", queries[0])
         self.assertTrue(queries[1].startswith("ytsearch5:"))
 
     def test_ytmusic_fallback_to_ytsearch(self):
@@ -310,6 +311,84 @@ class TieredSearchTests(unittest.TestCase):
 
         self.assertEqual(results, [candidate])
         self.assertEqual(search.call_count, 2)
+
+    def test_failed_search_tier_does_not_abort_fallbacks(self):
+        track = dl.Track(name="Song", artists="Artist")
+        candidate = {"id": "abc", "title": "Artist - Song", "uploader": "Artist"}
+        with patch.object(
+            dl,
+            "youtube_candidates_for_query",
+            side_effect=[RuntimeError("unsupported search"), [candidate]],
+        ) as search:
+            chosen, reason = dl.find_youtube_candidate(track)
+
+        self.assertEqual(chosen, candidate)
+        self.assertIn("matched", reason)
+        self.assertEqual(search.call_count, 2)
+
+    def test_retry_attempts_change_clients_and_audio_format(self):
+        base = {"format": "bestaudio/best", "quiet": True}
+        initial = dl.youtube_attempt_options(base, attempt=0, audio=True)
+        retry = dl.youtube_attempt_options(base, attempt=1, audio=True)
+
+        self.assertNotIn("extractor_args", initial)
+        self.assertIn("extractor_args", retry)
+        self.assertNotEqual(initial["format"], retry["format"])
+
+    def test_download_retries_default_to_two_and_are_customizable(self):
+        default_args = dl.parse_args(["download", "https://youtu.be/example"])
+        custom_args = dl.parse_args(["download", "--retries", "4", "https://youtu.be/example"])
+
+        self.assertEqual(dl.RunOptions.from_args(default_args).retries, 2)
+        self.assertEqual(dl.RunOptions.from_args(custom_args).retries, 4)
+
+    def test_track_retry_uses_next_search_and_download_method(self):
+        track = dl.Track(name="Song", artists="Artist", duration_ms=120_000)
+        candidate = {
+            "id": "abc",
+            "title": "Artist - Song",
+            "uploader": "Artist",
+            "duration": 120,
+        }
+        used_options = []
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.options = options
+                used_options.append(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def download(self, urls):
+                output = Path(str(self.options["outtmpl"]).replace("%(ext)s", "mp3"))
+                output.write_bytes(b"audio")
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(dl, "youtube_candidates_for_query", side_effect=[[], [candidate]]) as search,
+            patch.object(dl, "YoutubeDL", FakeYoutubeDL),
+            patch.object(dl, "apply_track_lyrics", return_value=None),
+            patch.object(dl, "tag"),
+        ):
+            result = dl.download_track(
+                track,
+                Path(tmp),
+                None,
+                1,
+                dl.RunOptions(retries=1, lyrics=False),
+                None,
+                {},
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(search.call_count, 2)
+        self.assertEqual(len(used_options), 1)
+        self.assertIn("extractor_args", used_options[0])
+        self.assertIn("alternate clients", result.detail)
 
 
 class FFmpegInstallTests(unittest.TestCase):
@@ -400,6 +479,34 @@ class PreviewHealthHistoryTests(unittest.TestCase):
         self.assertEqual(record["event"], "sample")
         self.assertEqual(record["value"], 42)
         self.assertIn("timestamp", record)
+
+    def test_youtube_download_json_event_includes_completed_file_path(self):
+        url = "https://www.youtube.com/watch?v=video123"
+        args = dl.parse_args(["download", "--json-events", "--output-dir", "/tmp/music", url])
+        output = io.StringIO()
+        result = dl.DownloadResult(True, "Channel - Song", "Song.mp3", "/tmp/music/Song.mp3")
+        with (
+            patch.object(
+                dl,
+                "fetch_youtube_info",
+                return_value={"title": "Song", "uploader": "Channel", "duration": 120},
+            ),
+            patch.object(dl, "download_youtube_media", return_value=result),
+            patch.object(dl, "find_ffmpeg_location", return_value=None),
+            patch.object(dl, "append_history"),
+            contextlib.redirect_stdout(output),
+        ):
+            exit_code = dl.run_download(args)
+
+        events = [
+            json.loads(line)
+            for line in output.getvalue().splitlines()
+            if line.startswith("{")
+        ]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(events[-1]["event"], "track_progress")
+        self.assertEqual(events[-1]["state"], "succeeded")
+        self.assertEqual(events[-1]["path"], "/tmp/music/Song.mp3")
 
     def test_append_history_writes_jsonl_record(self):
         with tempfile.TemporaryDirectory() as tmp:

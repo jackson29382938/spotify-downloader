@@ -141,7 +141,7 @@ private struct StatusRow: View {
             .orange
         case .running, .repairing:
             .accentColor
-        case .cancelled:
+        case .paused, .cancelled:
             .secondary
         default:
             .primary

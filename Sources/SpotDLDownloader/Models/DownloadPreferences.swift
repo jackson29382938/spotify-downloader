@@ -34,6 +34,15 @@ enum AudioFormat: String, CaseIterable, Identifiable {
     case wav
 
     var id: String { rawValue }
+
+    var canImportIntoAppleMusic: Bool {
+        switch self {
+        case .mp3, .m4a, .wav:
+            true
+        case .flac, .opus, .ogg:
+            false
+        }
+    }
 }
 
 enum Bitrate: String, CaseIterable, Identifiable {
@@ -161,4 +170,5 @@ enum Defaults {
     }
 
     static let defaultRenamePattern = "{track_number}. {title} - {artist}"
+    static let appleMusicPlaylistName = "Spotify Downloads"
 }

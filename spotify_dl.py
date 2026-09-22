@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 import unicodedata
 
 import requests as req
@@ -184,6 +184,7 @@ class RunOptions:
     json_events: bool = False
     media: str = "audio"
     ffmpeg_location: str | None = None
+    retries: int = 2
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "RunOptions":
@@ -200,6 +201,7 @@ class RunOptions:
             artwork_jpeg=getattr(args, "artwork_jpeg", False),
             json_events=getattr(args, "json_events", False),
             media=getattr(args, "media", "audio"),
+            retries=max(0, min(5, getattr(args, "retries", 2))),
         )
 
 
@@ -794,6 +796,12 @@ def handle_signal(signum: int, frame: object) -> None:
     raise KeyboardInterrupt
 
 
+def stop_download_if_requested(status: dict[str, object]) -> None:
+    """Let worker-thread yt-dlp transfers notice a pause/cancel immediately."""
+    if STOP_EVENT.is_set():
+        raise RuntimeError("cancelled")
+
+
 # ---------------------------------------------------------------------------
 # Artwork & tags
 # ---------------------------------------------------------------------------
@@ -1177,13 +1185,55 @@ def duration_seconds(track: Track) -> float | None:
 
 
 def youtube_search_queries(track: Track, limit: int = 5) -> list[str]:
-    """Tiered search queries: YouTube Music first, then broad YouTube, then lyrics."""
+    """Distinct search routes used by the initial attempt and up to five retries."""
     base = f"{track.artists} - {track.name}"
     return [
-        f"ytmsearch{limit}:{base}",
+        f"https://music.youtube.com/search?q={quote_plus(base)}#songs",
         f"ytsearch{limit}:{base}",
         f"ytsearch{limit}:{base} lyrics",
+        f"ytsearch{limit}:{base} official audio",
+        f"ytsearch{limit}:{base} topic",
+        f"ytsearch{limit}:{base} album audio",
     ]
+
+
+YOUTUBE_RETRY_METHODS = (
+    "YouTube Music songs",
+    "standard YouTube search with alternate clients",
+    "lyrics search with embedded clients",
+    "official-audio search with mobile clients",
+    "Topic-channel search with TV clients",
+    "album-audio search with mixed clients",
+)
+
+
+def youtube_attempt_options(base_options: dict[str, object], attempt: int, audio: bool) -> dict[str, object]:
+    """Change clients and preferred streams for every retry without dropping fallbacks."""
+    index = max(0, min(attempt, len(YOUTUBE_RETRY_METHODS) - 1))
+    options = dict(base_options)
+    client_sets = (
+        None,
+        ["android", "ios", "tv", "web_safari"],
+        ["web_embedded", "android_vr", "tv"],
+        ["mweb", "ios", "android"],
+        ["tv", "web_safari", "android_vr"],
+        ["android", "mweb", "web_embedded", "tv"],
+    )
+    clients = client_sets[index]
+    if clients:
+        options["extractor_args"] = {"youtube": {"player_client": clients}}
+
+    if audio:
+        audio_formats = (
+            "bestaudio/best",
+            "bestaudio[ext=m4a]/bestaudio/best",
+            "bestaudio[ext=webm]/bestaudio/best",
+            "ba[acodec^=mp4a]/bestaudio/best",
+            "ba[acodec^=opus]/bestaudio/best",
+            "bestaudio/best",
+        )
+        options["format"] = audio_formats[index]
+    return options
 
 
 def youtube_search_options(cookies_browser: str | None = None) -> dict[str, object]:
@@ -1192,6 +1242,7 @@ def youtube_search_options(cookies_browser: str | None = None) -> dict[str, obje
         "no_warnings": True,
         "extract_flat": False,
         "noplaylist": True,
+        "playlistend": 5,
     }
     if cookies_browser:
         options["cookiesfrombrowser"] = (cookies_browser,)
@@ -1218,6 +1269,36 @@ def gather_youtube_candidates(track: Track, limit: int = 5, cookies_browser: str
         if entries:
             return entries
     return []
+
+
+def find_youtube_candidate(
+    track: Track,
+    allow_closest: bool = False,
+    cookies_browser: str | None = None,
+) -> tuple[dict | None, str]:
+    """Search each tier independently so one extractor failure cannot abort all fallbacks."""
+    reason = "no YouTube results"
+    search_errors: list[str] = []
+    completed_search = False
+    for query in youtube_search_queries(track):
+        try:
+            candidates = youtube_candidates_for_query(query, cookies_browser)
+        except Exception as exc:
+            detail = str(exc).strip()[:700]
+            search_errors.append(detail)
+            LOG.warning("youtube search failed for %s: %s", query, exc)
+            continue
+
+        completed_search = True
+        if not candidates:
+            continue
+        chosen, reason = choose_youtube_candidate(candidates, track, allow_closest)
+        if chosen:
+            return chosen, reason
+
+    if not completed_search and search_errors:
+        return None, f"YouTube search failed: {search_errors[-1]}"
+    return None, reason
 
 
 def candidate_url(candidate: dict) -> str | None:
@@ -1386,6 +1467,7 @@ def youtube_common_options(output_dir: Path, overwrite: str, cookies_browser: st
         "no_warnings": True,
         "overwrites": overwrite == "force",
         "continuedl": overwrite != "force",
+        "progress_hooks": [stop_download_if_requested],
     }
     if cookies_browser:
         options["cookiesfrombrowser"] = (cookies_browser,)
@@ -1482,18 +1564,33 @@ def download_youtube_media(url: str, options: RunOptions) -> DownloadResult:
     if ffmpeg_location:
         ydl_opts["ffmpeg_location"] = ffmpeg_location
 
-    try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info = first_youtube_info(ydl.extract_info(url, download=True))
-            path = downloaded_file_path(info, ydl, preferred_ext)
-            return DownloadResult(
-                True,
-                youtube_label(info),
-                downloaded_file_detail(info, ydl, preferred_ext),
-                str(path) if path else None,
-            )
-    except Exception as exc:
-        return DownloadResult(False, url, str(exc).strip()[:700])
+    error_detail = "yt-dlp did not produce an output file"
+    total_attempts = max(1, options.retries + 1)
+    for attempt in range(total_attempts):
+        if STOP_EVENT.is_set():
+            return DownloadResult(False, url, "cancelled")
+        method = YOUTUBE_RETRY_METHODS[attempt]
+        if attempt > 0:
+            print(f"Retry {attempt}/{options.retries}: {method}", flush=True)
+        attempt_options = youtube_attempt_options(ydl_opts, attempt, options.media == "audio")
+        try:
+            with YoutubeDL(attempt_options) as ydl:
+                info = first_youtube_info(ydl.extract_info(url, download=True))
+                path = downloaded_file_path(info, ydl, preferred_ext)
+                detail = downloaded_file_detail(info, ydl, preferred_ext)
+                if attempt > 0:
+                    detail = f"{detail} via {method}"
+                return DownloadResult(
+                    True,
+                    youtube_label(info),
+                    detail,
+                    str(path) if path else None,
+                )
+        except Exception as exc:
+            error_detail = str(exc).strip()[:700]
+            LOG.warning("direct YouTube %s failed for %s: %s", method, url, error_detail[:300])
+
+    return DownloadResult(False, url, error_detail)
 
 
 # A thread-local-ish holder so YouTube media downloads know their folder.
@@ -1595,82 +1692,96 @@ def download_track(
         existing.unlink(missing_ok=True)
 
     working_track = enriched_track(track, fallback_cover_url)
+    queries = youtube_search_queries(working_track)
+    total_attempts = max(1, options.retries + 1)
+    reserved_stem: str | None = None
+    error_detail = "no YouTube results"
 
-    chosen: dict | None = None
-    reason = "no YouTube results"
-    try:
-        for query in youtube_search_queries(working_track):
-            candidates = youtube_candidates_for_query(query, options.cookies_browser)
-            if not candidates:
-                continue
-            chosen, reason = choose_youtube_candidate(candidates, working_track, options.allow_closest_match)
-            if chosen:
-                break
-    except Exception as exc:
-        LOG.warning("youtube search failed for %s: %s", label, exc)
-        return DownloadResult(False, label, f"YouTube search failed: {str(exc).strip()[:700]}")
+    for attempt in range(total_attempts):
+        if STOP_EVENT.is_set():
+            if reserved_stem:
+                release_output_stem(output_dir, reserved_stem, options.fmt)
+            return DownloadResult(False, label, "cancelled")
 
-    if not chosen:
-        LOG.info("youtube match rejected for %s: %s", label, reason)
-        return DownloadResult(False, label, reason)
+        method = YOUTUBE_RETRY_METHODS[attempt]
+        progress = min(0.85, 0.08 + (attempt / total_attempts) * 0.7)
+        message = "Searching" if attempt == 0 else f"Retry {attempt}/{options.retries}: {method}"
+        track_progress_event(options, working_track, pos, total, "running", progress, message)
+        if attempt > 0:
+            print(f"  Retry {attempt}/{options.retries} for {label}: {method}", flush=True)
 
-    video_url = candidate_url(chosen)
-    if not video_url:
-        return DownloadResult(False, label, "YouTube result did not include a playable URL")
-
-    LOG.info("selected %s for %s (%s)", chosen.get("id"), label, reason)
-    reserved_stem = reserve_output_stem(output_dir, stem, options.fmt, working_track.spotify_id)
-    ydl_opts: dict[str, object] = {
-        "format": "bestaudio/best",
-        "outtmpl": str(output_dir / f"{reserved_stem}.%(ext)s"),
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": options.fmt,
-                "preferredquality": normalized_audio_quality(options.bitrate),
-            }
-        ],
-    }
-    if ffmpeg_location:
-        ydl_opts["ffmpeg_location"] = ffmpeg_location
-    if options.cookies_browser:
-        ydl_opts["cookiesfrombrowser"] = (options.cookies_browser,)
-
-    attempts = [
-        ("default", ydl_opts),
-        (
-            "alternate YouTube clients",
-            {
-                **ydl_opts,
-                "extractor_args": {
-                    "youtube": {"player_client": ["android", "ios", "tv", "web_safari"]}
-                },
-            },
-        ),
-    ]
-    error_detail = ""
-    for attempt_label, opts in attempts:
         try:
-            with YoutubeDL(opts) as ydl:
+            candidates = youtube_candidates_for_query(queries[attempt], options.cookies_browser)
+        except Exception as exc:
+            error_detail = f"YouTube search failed: {str(exc).strip()[:700]}"
+            LOG.warning("%s search failed for %s: %s", method, label, str(exc)[:300])
+            continue
+
+        if not candidates:
+            error_detail = f"{method} returned no results"
+            continue
+
+        chosen, reason = choose_youtube_candidate(
+            candidates,
+            working_track,
+            options.allow_closest_match,
+        )
+        if not chosen:
+            error_detail = reason
+            LOG.info("%s rejected results for %s: %s", method, label, reason)
+            continue
+
+        video_url = candidate_url(chosen)
+        if not video_url:
+            error_detail = "YouTube result did not include a playable URL"
+            continue
+
+        LOG.info("selected %s for %s via %s (%s)", chosen.get("id"), label, method, reason)
+        if reserved_stem is None:
+            reserved_stem = reserve_output_stem(output_dir, stem, options.fmt, working_track.spotify_id)
+
+        base_options: dict[str, object] = {
+            "format": "bestaudio/best",
+            "outtmpl": str(output_dir / f"{reserved_stem}.%(ext)s"),
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "progress_hooks": [stop_download_if_requested],
+            "postprocessors": [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": options.fmt,
+                    "preferredquality": normalized_audio_quality(options.bitrate),
+                }
+            ],
+        }
+        if ffmpeg_location:
+            base_options["ffmpeg_location"] = ffmpeg_location
+        if options.cookies_browser:
+            base_options["cookiesfrombrowser"] = (options.cookies_browser,)
+
+        attempt_options = youtube_attempt_options(base_options, attempt, audio=True)
+        try:
+            with YoutubeDL(attempt_options) as ydl:
                 ydl.download([video_url])
             final = existing_output(output_dir, reserved_stem, options.fmt)
-            if final:
-                lyrics = apply_track_lyrics(final, working_track, options)
-                tag(final, working_track, pos, lyrics, options.artwork_max_size, options.artwork_jpeg)
-                append_manifest(output_dir, key, final)
-                detail = final.name if attempt_label == "default" else f"{final.name} via {attempt_label}"
-                release_output_stem(output_dir, reserved_stem, options.fmt)
-                return DownloadResult(True, label, detail, str(final))
-            error_detail = f"{attempt_label} produced no output file"
-        except Exception as exc:
-            error_detail = str(exc).strip()
-            LOG.warning("%s download failed for %s: %s", attempt_label, label, error_detail[:300])
+            if not final:
+                error_detail = f"{method} produced no output file"
+                continue
 
-    release_output_stem(output_dir, reserved_stem, options.fmt)
-    return DownloadResult(False, label, (error_detail or "yt-dlp did not produce an output file")[:700])
+            lyrics = apply_track_lyrics(final, working_track, options)
+            tag(final, working_track, pos, lyrics, options.artwork_max_size, options.artwork_jpeg)
+            append_manifest(output_dir, key, final)
+            detail = final.name if attempt == 0 else f"{final.name} via {method}"
+            release_output_stem(output_dir, reserved_stem, options.fmt)
+            return DownloadResult(True, label, detail, str(final))
+        except Exception as exc:
+            error_detail = str(exc).strip()[:700]
+            LOG.warning("%s download failed for %s: %s", method, label, error_detail[:300])
+
+    if reserved_stem:
+        release_output_stem(output_dir, reserved_stem, options.fmt)
+    return DownloadResult(False, label, error_detail[:700])
 
 
 # ---------------------------------------------------------------------------
@@ -2464,6 +2575,7 @@ def create_parser() -> argparse.ArgumentParser:
     download.add_argument("-f", "--format", default="mp3", dest="fmt", choices=("mp3", "m4a", "flac", "opus", "ogg", "wav"), help="Audio output format.")
     download.add_argument("-b", "--bitrate", default="192k", help="Audio quality, e.g. 192k, 320k, 0.")
     download.add_argument("--threads", type=int, default=4, help="Parallel downloads per playlist.")
+    download.add_argument("--retries", type=int, choices=range(0, 6), default=2, help="Additional attempts per failed track (0-5), using different search and download methods.")
     download.add_argument("--overwrite", choices=("skip", "metadata", "force"), default="skip", help="How to handle existing files.")
     download.add_argument("--track-number-prefix", dest="track_number_prefix", action="store_true", default=True, help="Prefix files with their track number.")
     download.add_argument("--no-track-number-prefix", dest="track_number_prefix", action="store_false", help="Do not prefix files with their track number.")
@@ -2517,7 +2629,7 @@ def run_download(args: argparse.Namespace) -> int:
     options_output_dir.set(str(Path(args.output_dir).expanduser()))
 
     total_failures = 0
-    for url in args.urls:
+    for url_index, url in enumerate(args.urls, 1):
         if is_spotify_url(url):
             if args.media == "video":
                 print("Spotify links can only be downloaded as audio.", file=sys.stderr, flush=True)
@@ -2571,6 +2683,22 @@ def run_download(args: argparse.Namespace) -> int:
             if args.dry_run:
                 continue
 
+            youtube_title_text = str(youtube_info.get("title") or "YouTube audio")
+            youtube_artist_text = str(youtube_info.get("uploader") or youtube_info.get("channel") or "").strip()
+            emit_json_event(
+                options.json_events,
+                "track_progress",
+                key=url,
+                index=url_index if len(args.urls) > 1 else None,
+                total=len(args.urls),
+                label=youtube_label(youtube_info),
+                title=youtube_title_text,
+                artists=youtube_artist_text,
+                progress=0.05,
+                state="running",
+                message="Downloading",
+            )
+
             try:
                 result = download_youtube_media(url, options)
             except KeyboardInterrupt:
@@ -2579,9 +2707,36 @@ def run_download(args: argparse.Namespace) -> int:
 
             if result.ok:
                 print(f"Done: {result.label} ({result.detail})", flush=True)
+                emit_json_event(
+                    options.json_events,
+                    "track_progress",
+                    key=url,
+                    index=url_index if len(args.urls) > 1 else None,
+                    total=len(args.urls),
+                    label=result.label,
+                    title=youtube_title_text,
+                    artists=youtube_artist_text,
+                    progress=1.0,
+                    state="succeeded",
+                    message=result.detail,
+                    path=result.path,
+                )
             else:
                 total_failures += 1
                 print(f"Failed: {result.detail}", flush=True)
+                emit_json_event(
+                    options.json_events,
+                    "track_progress",
+                    key=url,
+                    index=url_index if len(args.urls) > 1 else None,
+                    total=len(args.urls),
+                    label=result.label,
+                    title=youtube_title_text,
+                    artists=youtube_artist_text,
+                    progress=1.0,
+                    state="failed",
+                    message=result.detail,
+                )
             append_history(
                 {
                     "source_url": url,

@@ -9,6 +9,7 @@ enum DownloadStatus: Equatable {
     case repairing(startedAt: Date)
     case succeeded
     case failed(code: Int32)
+    case paused
     case cancelled
 
     var title: String {
@@ -29,6 +30,8 @@ enum DownloadStatus: Equatable {
             "Complete"
         case .failed(let code):
             "Failed: exit \(code)"
+        case .paused:
+            "Paused"
         case .cancelled:
             "Cancelled"
         }
@@ -52,6 +55,8 @@ enum DownloadStatus: Equatable {
             "checkmark.seal.fill"
         case .failed:
             "xmark.octagon.fill"
+        case .paused:
+            "pause.circle.fill"
         case .cancelled:
             "stop.circle.fill"
         }
