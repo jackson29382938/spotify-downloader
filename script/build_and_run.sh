@@ -40,6 +40,7 @@ import PyInstaller  # noqa: F401
 import mutagen  # noqa: F401
 import requests  # noqa: F401
 import yt_dlp  # noqa: F401
+import yt_dlp_ejs  # noqa: F401
 PY
   then
     echo "Installing downloader packaging dependencies..."
@@ -58,7 +59,7 @@ if [[ ! -f "$APP_ICON" || "$ROOT_DIR/script/generate_app_icon.py" -nt "$APP_ICON
   "$PYTHON_BIN" "$ROOT_DIR/script/generate_app_icon.py"
 fi
 
-if [[ ! -x "$PORTABLE_DOWNLOADER" || "$ROOT_DIR/spotify_dl.py" -nt "$PORTABLE_DOWNLOADER" ]]; then
+if [[ ! -x "$PORTABLE_DOWNLOADER" || "$ROOT_DIR/spotify_dl.py" -nt "$PORTABLE_DOWNLOADER" || "$ROOT_DIR/requirements.txt" -nt "$PORTABLE_DOWNLOADER" ]]; then
   ensure_python_env
   echo "Packaging standalone downloader..."
   rm -rf "$PORTABLE_BUILD_DIR"
@@ -71,6 +72,7 @@ if [[ ! -x "$PORTABLE_DOWNLOADER" || "$ROOT_DIR/spotify_dl.py" -nt "$PORTABLE_DO
     --workpath "$ROOT_DIR/.build/pyinstaller-work" \
     --specpath "$ROOT_DIR/.build/pyinstaller-spec" \
     --collect-all yt_dlp \
+    --collect-all yt_dlp_ejs \
     "$ROOT_DIR/spotify_dl.py"
   chmod +x "$PORTABLE_DOWNLOADER"
 else

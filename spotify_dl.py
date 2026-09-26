@@ -13,12 +13,14 @@ The script exposes several subcommands consumed by the native macOS app:
     preview         Emit JSON describing the tracks a download would fetch.
     health          Emit a JSON diagnostics report.
     library         Scan/repair an existing music library's metadata.
+    embed-lrc       Move .lrc sidecar lyrics into the audio files themselves.
     ffmpeg-install  Download a static ffmpeg build into Application Support.
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import html
 import io
 import json
@@ -48,7 +50,7 @@ from yt_dlp import YoutubeDL
 try:
     from mutagen.easyid3 import EasyID3
     from mutagen.flac import FLAC, Picture
-    from mutagen.id3 import APIC, ID3, ID3NoHeaderError, USLT
+    from mutagen.id3 import APIC, ID3, ID3NoHeaderError, SYLT, USLT
     from mutagen.mp4 import MP4, MP4Cover
     from mutagen.oggopus import OggOpus
     from mutagen.oggvorbis import OggVorbis
@@ -85,6 +87,8 @@ YOUTUBE_HOSTS = {
 COOKIE_BROWSERS = ("safari", "chrome", "firefox", "chromium", "edge", "opera", "brave")
 ARTWORK_SIZES = ("unlimited", "600", "1200")
 LYRICS_API = "https://lrclib.net/api/get"
+LYRICS_SEARCH_API = "https://lrclib.net/api/search"
+LYRICS_STYLES = ("plain", "synced")
 ITUNES_API = "https://itunes.apple.com/search"
 MUSICBRAINZ_API = "https://musicbrainz.org/ws/2/recording"
 EVERMEET_FFMPEG = "https://evermeet.cx/ffmpeg/getrelease/zip"
@@ -115,7 +119,7 @@ RESERVED_DEVICE_NAMES = {
 }
 COMMON_TITLE_SUFFIX_RE = re.compile(
     r"\s*(?:[-(]\s*)?"
-    r"(?:official\s+)?(?:audio|video|lyrics?|visualizer|remaster(?:ed)?|"
+    r"(?:\d{4}\s+)?(?:official\s+)?(?:audio|video|lyrics?|visualizer|remaster(?:ed)?|"
     r"mono|stereo|live|sped\s+up|slowed|nightcore|clean|explicit)"
     r"(?:\s+\d{4})?\s*[)]?\s*$",
     re.IGNORECASE,
@@ -135,9 +139,29 @@ MODIFIER_KEYWORDS = (
     "live",
     "mashup",
     "demo",
-    "remaster",
 )
 LRC_TIMESTAMP_RE = re.compile(r"\[\d{1,2}:\d{2}(?:[.:]\d{1,3})?\]")
+LRC_TIMESTAMP_PARTS_RE = re.compile(r"\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]")
+LRC_METADATA_RE = re.compile(r"^\s*\[[A-Za-z#]+:[^\]]*\]\s*$")
+# Spotify appends edition notes ("- 2015 Remaster", "(Mono Version)") that
+# YouTube uploads rarely repeat. Tails made only of these words are dropped
+# before searching and matching; anything else ("Live", "Remix") is kept.
+NEUTRAL_VERSION_WORDS = {
+    "remaster", "remastered", "remasterizado", "remasterizada", "version", "edit",
+    "radio", "single", "album", "mono", "stereo", "original", "digital", "deluxe",
+    "edition", "bonus", "track", "anniversary", "expanded", "explicit", "clean",
+    "mix", "master", "st", "nd", "rd", "th",
+}
+FEATURE_SEGMENT_RE = re.compile(
+    r"\s*(?:[(\[]\s*(?:feat\.?|featuring|ft\.?|with)\s+[^)\]]*[)\]]|-\s+(?:feat\.?|featuring|ft\.?|with)\s+.*$)",
+    re.IGNORECASE,
+)
+DASH_TAIL_RE = re.compile(r"\s+-\s+(?P<tail>[^-]+?)\s*$")
+BRACKET_TAIL_RE = re.compile(r"\s*[(\[](?P<tail>[^()\[\]]+)[)\]]\s*$")
+SOUNDTRACK_TAIL_RE = re.compile(
+    r"^from\b.*\b(?:soundtrack|motion picture|film|movie|series|musical|original score)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -148,6 +172,26 @@ class Track:
     duration_ms: int | None = None
     cover_url: str | None = None
     album: str | None = None
+
+
+@dataclass(frozen=True)
+class Lyrics:
+    plain: str | None = None
+    synced: str | None = None
+
+    def __bool__(self) -> bool:
+        return bool(self.plain or self.synced)
+
+    def text(self, style: str = "plain") -> str | None:
+        """Text for the standard lyrics tag: LRC timestamps only when asked for."""
+        if style == "synced" and self.synced:
+            return self.synced
+        if self.plain:
+            return self.plain
+        return strip_lrc_timestamps(self.synced) if self.synced else None
+
+    def synced_lines(self) -> list[tuple[str, int]]:
+        return parse_lrc(self.synced) if self.synced else []
 
 
 @dataclass(frozen=True)
@@ -177,7 +221,8 @@ class RunOptions:
     track_number_prefix: bool = True
     allow_closest_match: bool = False
     lyrics: bool = True
-    write_lrc: bool = True
+    lyrics_style: str = "plain"
+    write_lrc: bool = False
     cookies_browser: str | None = None
     artwork_max_size: int | None = None
     artwork_jpeg: bool = False
@@ -195,7 +240,8 @@ class RunOptions:
             track_number_prefix=getattr(args, "track_number_prefix", True),
             allow_closest_match=getattr(args, "allow_closest_match", False),
             lyrics=getattr(args, "lyrics", True),
-            write_lrc=getattr(args, "write_lrc", True),
+            lyrics_style=getattr(args, "lyrics_style", "plain"),
+            write_lrc=getattr(args, "write_lrc", False),
             cookies_browser=getattr(args, "cookies_browser", None),
             artwork_max_size=artwork_size_value(getattr(args, "artwork_max_size", "unlimited")),
             artwork_jpeg=getattr(args, "artwork_jpeg", False),
@@ -882,7 +928,6 @@ def write_mp3_tags(
     track: Track,
     pos: int | None,
     cover: tuple[bytes, str] | None,
-    lyrics: str | None = None,
 ) -> None:
     try:
         audio = EasyID3(str(path))
@@ -899,18 +944,14 @@ def write_mp3_tags(
         audio["tracknumber"] = [str(pos)]
     audio.save(v2_version=3)
 
-    if cover or lyrics:
+    if cover:
         try:
             id3 = ID3(str(path))
         except ID3NoHeaderError:
             id3 = ID3()
-        if cover:
-            data, mime = cover
-            id3.delall("APIC")
-            id3.add(APIC(encoding=1, mime=mime, type=3, desc="Cover", data=data))
-        if lyrics:
-            id3.delall("USLT")
-            id3.add(USLT(encoding=3, lang="eng", desc="", text=lyrics))
+        data, mime = cover
+        id3.delall("APIC")
+        id3.add(APIC(encoding=1, mime=mime, type=3, desc="Cover", data=data))
         id3.update_to_v23()
         id3.save(str(path), v2_version=3)
 
@@ -920,7 +961,6 @@ def write_m4a_tags(
     track: Track,
     pos: int | None,
     cover: tuple[bytes, str] | None,
-    lyrics: str | None = None,
 ) -> None:
     audio = MP4(str(path))
     audio["\xa9nam"] = [track.name]
@@ -929,8 +969,6 @@ def write_m4a_tags(
         audio["\xa9alb"] = [track.album]
     if pos is not None:
         audio["trkn"] = [(pos, 0)]
-    if lyrics:
-        audio["\xa9lyr"] = [lyrics]
     if cover:
         data, mime = cover
         if mime == "image/png":
@@ -945,7 +983,6 @@ def write_flac_tags(
     track: Track,
     pos: int | None,
     cover: tuple[bytes, str] | None,
-    lyrics: str | None = None,
 ) -> None:
     audio = FLAC(str(path))
     audio["title"] = [track.name]
@@ -954,8 +991,6 @@ def write_flac_tags(
         audio["album"] = [track.album]
     if pos is not None:
         audio["tracknumber"] = [str(pos)]
-    if lyrics:
-        audio["lyrics"] = [lyrics]
     if cover:
         data, mime = cover
         picture = Picture()
@@ -968,7 +1003,7 @@ def write_flac_tags(
     audio.save()
 
 
-def write_ogg_tags(path: Path, track: Track, pos: int | None, lyrics: str | None = None) -> None:
+def write_ogg_tags(path: Path, track: Track, pos: int | None) -> None:
     audio = OggOpus(str(path)) if path.suffix.lower() == ".opus" else OggVorbis(str(path))
     audio["title"] = [track.name]
     audio["artist"] = [track.artists]
@@ -976,18 +1011,64 @@ def write_ogg_tags(path: Path, track: Track, pos: int | None, lyrics: str | None
         audio["album"] = [track.album]
     if pos is not None:
         audio["tracknumber"] = [str(pos)]
-    if lyrics:
-        audio["lyrics"] = [lyrics]
     audio.save()
+
+
+def embed_lyrics(path: Path, lyrics: Lyrics | None, style: str = "plain") -> bool:
+    """Write lyrics into the audio file itself, touching only lyric tags.
+
+    Every format gets the standard lyrics tag (USLT, \xa9lyr, or LYRICS), which
+    Apple Music and most players display. MP3 also gets a SYLT frame so the
+    timing travels inside the file instead of in a .lrc sidecar. With the
+    "synced" style the standard tag holds timestamped LRC text, which players
+    such as Poweramp, MusicBee, foobar2000, Jellyfin, and Navidrome scroll
+    line by line.
+    """
+    if not HAS_MUTAGEN or not lyrics:
+        return False
+    text = lyrics.text(style)
+    if not text:
+        return False
+
+    suffix = path.suffix.lower()
+    if suffix == ".mp3":
+        try:
+            id3 = ID3(str(path))
+        except ID3NoHeaderError:
+            id3 = ID3()
+        id3.delall("USLT")
+        id3.delall("SYLT")
+        id3.add(USLT(encoding=1, lang="eng", desc="", text=text))
+        lines = lyrics.synced_lines()
+        if lines:
+            id3.add(SYLT(encoding=1, lang="eng", format=2, type=1, desc="", text=lines))
+        id3.update_to_v23()
+        id3.save(str(path), v2_version=3)
+    elif suffix == ".m4a":
+        audio = MP4(str(path))
+        audio["\xa9lyr"] = [text]
+        audio.save()
+    elif suffix == ".flac":
+        audio = FLAC(str(path))
+        audio["lyrics"] = [text]
+        audio.save()
+    elif suffix in {".opus", ".ogg"}:
+        audio = OggOpus(str(path)) if suffix == ".opus" else OggVorbis(str(path))
+        audio["lyrics"] = [text]
+        audio.save()
+    else:
+        return False
+    return True
 
 
 def tag(
     path: Path,
     track: Track,
     pos: int | None,
-    lyrics: str | None = None,
+    lyrics: Lyrics | None = None,
     artwork_max_size: int | None = None,
     artwork_jpeg: bool = False,
+    lyrics_style: str = "plain",
 ) -> None:
     if not HAS_MUTAGEN:
         return
@@ -998,13 +1079,14 @@ def tag(
         if cover is not None:
             cover = process_artwork(cover[0], cover[1], artwork_max_size, artwork_jpeg)
         if suffix == ".mp3":
-            write_mp3_tags(path, track, pos, cover, lyrics)
+            write_mp3_tags(path, track, pos, cover)
         elif suffix == ".m4a":
-            write_m4a_tags(path, track, pos, cover, lyrics)
+            write_m4a_tags(path, track, pos, cover)
         elif suffix == ".flac":
-            write_flac_tags(path, track, pos, cover, lyrics)
+            write_flac_tags(path, track, pos, cover)
         elif suffix in {".opus", ".ogg"}:
-            write_ogg_tags(path, track, pos, lyrics)
+            write_ogg_tags(path, track, pos)
+        embed_lyrics(path, lyrics, lyrics_style)
     except Exception as exc:
         LOG.warning("tagging failed for %s: %s", path, exc)
         print(f"  Warning: tagging failed for {path.name}: {exc}", flush=True)
@@ -1018,9 +1100,28 @@ def tag(
 def strip_lrc_timestamps(synced: str) -> str:
     lines = []
     for raw_line in synced.splitlines():
+        if LRC_METADATA_RE.match(raw_line):
+            continue
         cleaned = LRC_TIMESTAMP_RE.sub("", raw_line).strip()
         lines.append(cleaned)
-    return "\n".join(lines)
+    return "\n".join(lines).strip("\n")
+
+
+def parse_lrc(synced: str) -> list[tuple[str, int]]:
+    """Return (line, milliseconds) pairs sorted by time, as SYLT expects."""
+    lines: list[tuple[str, int]] = []
+    for raw_line in synced.splitlines():
+        stamps = list(LRC_TIMESTAMP_PARTS_RE.finditer(raw_line))
+        if not stamps:
+            continue
+        text = LRC_TIMESTAMP_RE.sub("", raw_line).strip()
+        for stamp in stamps:
+            minutes, seconds, fraction = stamp.groups()
+            fraction = fraction or "0"
+            millis = int(fraction.ljust(3, "0")[:3])
+            lines.append((text, (int(minutes) * 60 + int(seconds)) * 1000 + millis))
+    lines.sort(key=lambda item: item[1])
+    return lines
 
 
 def lyrics_from_record(record: dict) -> str | None:
@@ -1031,6 +1132,58 @@ def lyrics_from_record(record: dict) -> str | None:
     if isinstance(synced, str) and synced.strip():
         return strip_lrc_timestamps(synced)
     return None
+
+
+def lyrics_payload_from_record(record: dict | None) -> Lyrics | None:
+    if not record:
+        return None
+    synced = record.get("syncedLyrics")
+    payload = Lyrics(
+        plain=lyrics_from_record(record),
+        synced=synced if isinstance(synced, str) and synced.strip() else None,
+    )
+    return payload or None
+
+
+def lyrics_from_lrc_text(text: str) -> Lyrics | None:
+    if LRC_TIMESTAMP_RE.search(text):
+        payload = Lyrics(plain=strip_lrc_timestamps(text) or None, synced=text.strip())
+    else:
+        payload = Lyrics(plain=text.strip() or None)
+    return payload or None
+
+
+def _search_lyrics_record(track: Track) -> dict | None:
+    """Fallback for tracks whose exact title/album/duration misses on /api/get."""
+    params = {
+        "track_name": clean_track_title(track.name),
+        "artist_name": primary_artist(track.artists),
+    }
+    response = req.get(LYRICS_SEARCH_API, params=params, headers={"User-Agent": USER_AGENT}, timeout=15)
+    if response.status_code != 200:
+        return None
+    results = response.json()
+    if not isinstance(results, list):
+        return None
+
+    expected = duration_seconds(track)
+    wanted_title = normalize_match_text(clean_track_title(track.name))
+    wanted_modifiers = extract_modifiers(clean_track_title(track.name))
+    best: tuple[float, dict] | None = None
+    for item in results:
+        if not isinstance(item, dict) or not (item.get("plainLyrics") or item.get("syncedLyrics")):
+            continue
+        item_title = clean_track_title(str(item.get("trackName") or ""))
+        if wanted_title != normalize_match_text(item_title) or wanted_modifiers != extract_modifiers(item_title):
+            continue
+        duration = item.get("duration")
+        diff = abs(float(duration) - expected) if expected and isinstance(duration, (int, float)) else 0.0
+        if expected and diff > 5:
+            continue
+        score = diff - (1.0 if item.get("syncedLyrics") else 0.0)
+        if best is None or score < best[0]:
+            best = (score, item)
+    return best[1] if best else None
 
 
 def _lyrics_record(track: Track) -> dict | None:
@@ -1051,6 +1204,8 @@ def _lyrics_record(track: Track) -> dict | None:
             payload = response.json()
             if isinstance(payload, dict):
                 record = payload
+        if record is None:
+            record = _search_lyrics_record(track)
     except Exception as exc:
         LOG.info("lyrics lookup failed for %s - %s: %s", track.artists, track.name, exc)
 
@@ -1062,6 +1217,10 @@ def _lyrics_record(track: Track) -> dict | None:
 def fetch_lyrics(track: Track) -> str | None:
     record = _lyrics_record(track)
     return lyrics_from_record(record) if record else None
+
+
+def fetch_lyrics_payload(track: Track) -> Lyrics | None:
+    return lyrics_payload_from_record(_lyrics_record(track))
 
 
 def fetch_synced_lyrics(track: Track) -> str | None:
@@ -1184,65 +1343,186 @@ def duration_seconds(track: Track) -> float | None:
     return track.duration_ms / 1000 if track.duration_ms else None
 
 
-def youtube_search_queries(track: Track, limit: int = 5) -> list[str]:
-    """Distinct search routes used by the initial attempt and up to five retries."""
-    base = f"{track.artists} - {track.name}"
+def _is_neutral_version_tail(tail: str) -> bool:
+    if SOUNDTRACK_TAIL_RE.match(tail.strip()):
+        return True
+    words = re.findall(r"[a-z]+|\d+", unicodedata.normalize("NFKD", tail).casefold())
+    return bool(words) and all(word.isdigit() or word in NEUTRAL_VERSION_WORDS for word in words)
+
+
+def clean_track_title(name: str) -> str:
+    """Drop featured-artist and edition tails Spotify adds to titles.
+
+    "Run to the Hills - 2015 Remaster" -> "Run to the Hills"
+    "Song (feat. Someone)"             -> "Song"
+    "Song - Live at Wembley"           -> unchanged ("live" is a real version)
+    """
+    cleaned = FEATURE_SEGMENT_RE.sub("", name).strip()
+    while True:
+        match = DASH_TAIL_RE.search(cleaned) or BRACKET_TAIL_RE.search(cleaned)
+        if not match or not _is_neutral_version_tail(match.group("tail")):
+            break
+        shorter = cleaned[: match.start()].strip()
+        if not shorter:
+            break
+        cleaned = shorter
+    return cleaned or name
+
+
+def primary_artist(artists: str) -> str:
+    tokens = re.split(r",|&|\bfeat\.?\b|\bfeaturing\b|\bft\.?\b", artists, flags=re.IGNORECASE)
+    first = tokens[0].strip() if tokens else ""
+    return first or artists
+
+
+def youtube_search_queries(track: Track, limit: int = 10) -> list[str]:
+    """Distinct search routes, cheapest and most reliable first.
+
+    Searches are flat (no per-video page loads), so every route can be tried
+    for one track without tripping YouTube's bot check.
+    """
+    title = clean_track_title(track.name)
+    base = f"{track.artists} - {title}"
+    lead = f"{primary_artist(track.artists)} - {title}"
     return [
-        f"https://music.youtube.com/search?q={quote_plus(base)}#songs",
         f"ytsearch{limit}:{base}",
-        f"ytsearch{limit}:{base} lyrics",
-        f"ytsearch{limit}:{base} official audio",
-        f"ytsearch{limit}:{base} topic",
-        f"ytsearch{limit}:{base} album audio",
+        f"ytsearch{limit}:{lead} official audio",
+        f"https://music.youtube.com/search?q={quote_plus(lead)}",
+        f"ytsearch{limit}:{lead} topic",
+        f"ytsearch{limit}:{lead} lyrics",
     ]
 
 
-YOUTUBE_RETRY_METHODS = (
-    "YouTube Music songs",
-    "standard YouTube search with alternate clients",
-    "lyrics search with embedded clients",
-    "official-audio search with mobile clients",
-    "Topic-channel search with TV clients",
-    "album-audio search with mixed clients",
+# Each retry downloads with a different set of YouTube player clients. Every
+# set avoids clients that need a PO token for audio (android, ios, mweb,
+# web_safari, android_vr), which is what produces "HTTP Error 403: Forbidden".
+YOUTUBE_DOWNLOAD_STRATEGIES: tuple[tuple[str, list[str] | None, str], ...] = (
+    ("default clients", None, "bestaudio/best"),
+    ("TV client", ["tv", "default"], "bestaudio[ext=m4a]/bestaudio/best"),
+    ("embedded player client", ["web_embedded", "default"], "bestaudio/best"),
+    ("visionOS client", ["visionos"], "bestaudio[ext=webm]/bestaudio/best"),
+    ("TV and embedded clients", ["tv", "web_embedded"], "ba[acodec^=opus]/bestaudio/best"),
+    ("all no-token clients", ["tv", "web_embedded", "visionos", "default"], "bestaudio/best"),
 )
+YOUTUBE_RETRY_METHODS = tuple(name for name, _, _ in YOUTUBE_DOWNLOAD_STRATEGIES)
+VIDEO_SPECIFIC_ERROR_MARKERS = (
+    "video unavailable",
+    "private video",
+    "has been removed",
+    "not available in your country",
+    "sign in to confirm your age",
+    "age-restricted",
+    "members-only",
+    "copyright",
+    "premieres in",
+    "live event will begin",
+    "requested format is not available",
+)
+
+
+def is_bot_check_error(detail: str) -> bool:
+    lowered = detail.casefold()
+    return "confirm you" in lowered and "not a bot" in lowered
+
+
+def is_video_specific_error(detail: str) -> bool:
+    lowered = detail.casefold()
+    return any(marker in lowered for marker in VIDEO_SPECIFIC_ERROR_MARKERS)
+
+
+def friendly_error(detail: str) -> str:
+    """Turn raw yt-dlp errors into something a person can act on."""
+    lowered = detail.casefold()
+    if is_bot_check_error(detail):
+        return (
+            "YouTube asked to confirm you're not a bot. Choose your browser under "
+            "Settings > YouTube > Browser cookies, or lower concurrent downloads."
+        )
+    if "403" in lowered and "forbidden" in lowered:
+        runtime_hint = "" if find_js_runtimes() else " Install Deno (brew install deno) so yt-dlp can unlock all streams."
+        return "YouTube refused the audio stream (HTTP 403)." + runtime_hint
+    if "429" in lowered or "too many requests" in lowered:
+        return "YouTube is rate-limiting this network (HTTP 429). Lower concurrent downloads and retry later."
+    return detail
+
+
+def js_runtime_candidates() -> list[tuple[str, Path]]:
+    executable_dir = Path(sys.executable).resolve().parent
+    candidates: list[tuple[str, Path]] = []
+    for name in ("deno", "node", "bun"):
+        env_value = os_environ(f"SPOTIFY_DOWNLOADER_{name.upper()}")
+        if env_value:
+            candidates.append((name, Path(env_value).expanduser()))
+        candidates.extend(
+            (name, folder / name)
+            for folder in (
+                app_support_dir() / "bin",
+                executable_dir,
+                executable_dir.parent / "bin",
+                Path.home() / ".deno" / "bin",
+                Path("/opt/homebrew/bin"),
+                Path("/usr/local/bin"),
+            )
+        )
+        found = shutil.which(name)
+        if found:
+            candidates.append((name, Path(found)))
+    return candidates
+
+
+@functools.lru_cache(maxsize=1)
+def find_js_runtimes() -> dict[str, dict[str, str]]:
+    """JavaScript runtimes yt-dlp can use to solve YouTube's player challenges.
+
+    yt-dlp only enables Deno by default and looks for it on PATH; a Finder-
+    launched app has a minimal PATH, so pass every runtime we can find.
+    """
+    runtimes: dict[str, dict[str, str]] = {}
+    for name, path in js_runtime_candidates():
+        if name in runtimes:
+            continue
+        if path.is_file() and os.access(path, os.X_OK):
+            runtimes[name] = {"path": str(path)}
+    return runtimes
+
+
+def has_ejs_scripts() -> bool:
+    try:
+        import yt_dlp_ejs  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def with_js_runtimes(options: dict[str, object]) -> dict[str, object]:
+    runtimes = find_js_runtimes()
+    if runtimes:
+        options["js_runtimes"] = {name: dict(config) for name, config in runtimes.items()}
+    return options
 
 
 def youtube_attempt_options(base_options: dict[str, object], attempt: int, audio: bool) -> dict[str, object]:
     """Change clients and preferred streams for every retry without dropping fallbacks."""
-    index = max(0, min(attempt, len(YOUTUBE_RETRY_METHODS) - 1))
-    options = dict(base_options)
-    client_sets = (
-        None,
-        ["android", "ios", "tv", "web_safari"],
-        ["web_embedded", "android_vr", "tv"],
-        ["mweb", "ios", "android"],
-        ["tv", "web_safari", "android_vr"],
-        ["android", "mweb", "web_embedded", "tv"],
-    )
-    clients = client_sets[index]
+    index = max(0, min(attempt, len(YOUTUBE_DOWNLOAD_STRATEGIES) - 1))
+    _, clients, audio_format = YOUTUBE_DOWNLOAD_STRATEGIES[index]
+    options = with_js_runtimes(dict(base_options))
     if clients:
         options["extractor_args"] = {"youtube": {"player_client": clients}}
-
     if audio:
-        audio_formats = (
-            "bestaudio/best",
-            "bestaudio[ext=m4a]/bestaudio/best",
-            "bestaudio[ext=webm]/bestaudio/best",
-            "ba[acodec^=mp4a]/bestaudio/best",
-            "ba[acodec^=opus]/bestaudio/best",
-            "bestaudio/best",
-        )
-        options["format"] = audio_formats[index]
+        options["format"] = audio_format
     return options
 
 
-def youtube_search_options(cookies_browser: str | None = None) -> dict[str, object]:
+def youtube_search_options(cookies_browser: str | None = None, limit: int = 10) -> dict[str, object]:
     options: dict[str, object] = {
         "quiet": True,
         "no_warnings": True,
-        "extract_flat": False,
+        # Flat results already carry title, channel, and duration. Resolving
+        # every result's player page was what triggered YouTube's bot check.
+        "extract_flat": "in_playlist",
+        "ignoreerrors": True,
         "noplaylist": True,
-        "playlistend": 5,
+        "playlistend": limit,
     }
     if cookies_browser:
         options["cookiesfrombrowser"] = (cookies_browser,)
@@ -1258,7 +1538,7 @@ def youtube_candidates_for_query(query: str, cookies_browser: str | None = None)
     return [entry for entry in entries if isinstance(entry, dict)]
 
 
-def gather_youtube_candidates(track: Track, limit: int = 5, cookies_browser: str | None = None) -> list[dict]:
+def gather_youtube_candidates(track: Track, limit: int = 10, cookies_browser: str | None = None) -> list[dict]:
     """Return the first tier of search results that yields candidates."""
     for query in youtube_search_queries(track, limit):
         try:
@@ -1275,11 +1555,13 @@ def find_youtube_candidate(
     track: Track,
     allow_closest: bool = False,
     cookies_browser: str | None = None,
+    exclude_ids: set[str] | None = None,
 ) -> tuple[dict | None, str]:
     """Search each tier independently so one extractor failure cannot abort all fallbacks."""
     reason = "no YouTube results"
     search_errors: list[str] = []
     completed_search = False
+    excluded = exclude_ids or set()
     for query in youtube_search_queries(track):
         try:
             candidates = youtube_candidates_for_query(query, cookies_browser)
@@ -1290,6 +1572,7 @@ def find_youtube_candidate(
             continue
 
         completed_search = True
+        candidates = [candidate for candidate in candidates if candidate.get("id") not in excluded]
         if not candidates:
             continue
         chosen, reason = choose_youtube_candidate(candidates, track, allow_closest)
@@ -1321,8 +1604,9 @@ def choose_youtube_candidate(
         return None, "no YouTube results"
 
     expected_duration = duration_seconds(track)
-    title = normalize_match_text(track.name)
-    track_modifiers = extract_modifiers(track.name)
+    cleaned_title = clean_track_title(track.name)
+    title = normalize_match_text(cleaned_title)
+    track_modifiers = extract_modifiers(cleaned_title)
     artists = artist_tokens(track.artists)
 
     def title_ok(candidate: dict) -> bool:
@@ -1346,9 +1630,14 @@ def choose_youtube_candidate(
         candidate_modifiers = extract_modifiers(str(candidate.get("title") or ""))
         return track_modifiers.issubset(candidate_modifiers)
 
+    def same_version(candidate: dict) -> bool:
+        # A studio track should not pick up a live, sped-up, or cover upload.
+        return extract_modifiers(str(candidate.get("title") or "")) == track_modifiers
+
     artist_available = any(artist_ok(candidate) for candidate in candidates)
 
     strict_pool = [candidate for candidate in candidates if title_ok(candidate) and artist_ok(candidate)]
+    strict_pool = [candidate for candidate in strict_pool if same_version(candidate)] or strict_pool
     if strict_pool:
         if expected_duration:
             timed = [candidate for candidate in strict_pool if candidate.get("duration")]
@@ -1423,7 +1712,7 @@ def fetch_youtube_info(url: str, cookies_browser: str | None = None) -> dict:
     }
     if cookies_browser:
         ydl_opts["cookiesfrombrowser"] = (cookies_browser,)
-    with YoutubeDL(ydl_opts) as ydl:
+    with YoutubeDL(with_js_runtimes(ydl_opts)) as ydl:
         return first_youtube_info(ydl.extract_info(url, download=False))
 
 
@@ -1589,8 +1878,10 @@ def download_youtube_media(url: str, options: RunOptions) -> DownloadResult:
         except Exception as exc:
             error_detail = str(exc).strip()[:700]
             LOG.warning("direct YouTube %s failed for %s: %s", method, url, error_detail[:300])
+            if is_video_specific_error(error_detail):
+                break
 
-    return DownloadResult(False, url, error_detail)
+    return DownloadResult(False, url, friendly_error(error_detail))
 
 
 # A thread-local-ish holder so YouTube media downloads know their folder.
@@ -1642,18 +1933,14 @@ def enriched_track(track: Track, fallback_cover_url: str | None) -> Track:
     return track
 
 
-def apply_track_lyrics(path: Path, track: Track, options: RunOptions) -> str | None:
+def apply_track_lyrics(path: Path, track: Track, options: RunOptions) -> Lyrics | None:
+    """Look up lyrics for embedding; a .lrc sidecar is only written when asked for."""
     if not options.lyrics:
         return None
-    record = _lyrics_record(track)
-    if not record:
-        return None
-    plain = lyrics_from_record(record)
-    if options.write_lrc:
-        synced = record.get("syncedLyrics")
-        if isinstance(synced, str) and synced.strip():
-            write_lrc_sidecar(path, synced)
-    return plain
+    lyrics = fetch_lyrics_payload(track)
+    if lyrics and lyrics.synced and options.write_lrc:
+        write_lrc_sidecar(path, lyrics.synced)
+    return lyrics
 
 
 def download_track(
@@ -1685,17 +1972,18 @@ def download_track(
     if existing and options.overwrite == "metadata":
         working = enriched_track(track, fallback_cover_url)
         lyrics = apply_track_lyrics(existing, working, options)
-        tag(existing, working, pos, lyrics, options.artwork_max_size, options.artwork_jpeg)
+        tag(existing, working, pos, lyrics, options.artwork_max_size, options.artwork_jpeg, options.lyrics_style)
         append_manifest(output_dir, key, existing)
         return DownloadResult(True, label, f"metadata refreshed: {existing.name}", str(existing), True)
     if existing and options.overwrite == "force":
         existing.unlink(missing_ok=True)
 
     working_track = enriched_track(track, fallback_cover_url)
-    queries = youtube_search_queries(working_track)
     total_attempts = max(1, options.retries + 1)
     reserved_stem: str | None = None
     error_detail = "no YouTube results"
+    rejected_ids: set[str] = set()
+    chosen: dict | None = None
 
     for attempt in range(total_attempts):
         if STOP_EVENT.is_set():
@@ -1705,38 +1993,39 @@ def download_track(
 
         method = YOUTUBE_RETRY_METHODS[attempt]
         progress = min(0.85, 0.08 + (attempt / total_attempts) * 0.7)
-        message = "Searching" if attempt == 0 else f"Retry {attempt}/{options.retries}: {method}"
-        track_progress_event(options, working_track, pos, total, "running", progress, message)
         if attempt > 0:
             print(f"  Retry {attempt}/{options.retries} for {label}: {method}", flush=True)
+            # Back off a little so a rate-limited network can recover.
+            if STOP_EVENT.wait(min(8, 2 * attempt)):
+                continue
 
-        try:
-            candidates = youtube_candidates_for_query(queries[attempt], options.cookies_browser)
-        except Exception as exc:
-            error_detail = f"YouTube search failed: {str(exc).strip()[:700]}"
-            LOG.warning("%s search failed for %s: %s", method, label, str(exc)[:300])
-            continue
-
-        if not candidates:
-            error_detail = f"{method} returned no results"
-            continue
-
-        chosen, reason = choose_youtube_candidate(
-            candidates,
-            working_track,
-            options.allow_closest_match,
-        )
-        if not chosen:
-            error_detail = reason
-            LOG.info("%s rejected results for %s: %s", method, label, reason)
-            continue
+        if chosen is None:
+            message = "Searching" if attempt == 0 else f"Retry {attempt}/{options.retries}: searching again"
+            track_progress_event(options, working_track, pos, total, "running", progress, message)
+            chosen, reason = find_youtube_candidate(
+                working_track,
+                options.allow_closest_match,
+                options.cookies_browser,
+                rejected_ids,
+            )
+            if not chosen:
+                error_detail = reason
+                LOG.info("no usable YouTube match for %s: %s", label, reason)
+                if reason.startswith("YouTube search failed"):
+                    continue
+                # Every search route already ran; repeating them cannot help.
+                break
+            LOG.info("selected %s for %s (%s)", chosen.get("id"), label, reason)
 
         video_url = candidate_url(chosen)
         if not video_url:
             error_detail = "YouTube result did not include a playable URL"
+            rejected_ids.add(str(chosen.get("id")))
+            chosen = None
             continue
 
-        LOG.info("selected %s for %s via %s (%s)", chosen.get("id"), label, method, reason)
+        message = "Downloading" if attempt == 0 else f"Retry {attempt}/{options.retries}: {method}"
+        track_progress_event(options, working_track, pos, total, "running", progress + 0.05, message)
         if reserved_stem is None:
             reserved_stem = reserve_output_stem(output_dir, stem, options.fmt, working_track.spotify_id)
 
@@ -1770,7 +2059,7 @@ def download_track(
                 continue
 
             lyrics = apply_track_lyrics(final, working_track, options)
-            tag(final, working_track, pos, lyrics, options.artwork_max_size, options.artwork_jpeg)
+            tag(final, working_track, pos, lyrics, options.artwork_max_size, options.artwork_jpeg, options.lyrics_style)
             append_manifest(output_dir, key, final)
             detail = final.name if attempt == 0 else f"{final.name} via {method}"
             release_output_stem(output_dir, reserved_stem, options.fmt)
@@ -1778,10 +2067,14 @@ def download_track(
         except Exception as exc:
             error_detail = str(exc).strip()[:700]
             LOG.warning("%s download failed for %s: %s", method, label, error_detail[:300])
+            if is_video_specific_error(error_detail):
+                # This upload is unusable (removed, region-locked, ...); pick another.
+                rejected_ids.add(str(chosen.get("id")))
+                chosen = None
 
     if reserved_stem:
         release_output_stem(output_dir, reserved_stem, options.fmt)
-    return DownloadResult(False, label, error_detail[:700])
+    return DownloadResult(False, label, friendly_error(error_detail)[:700])
 
 
 # ---------------------------------------------------------------------------
@@ -2028,6 +2321,17 @@ def health_diagnostics(output_dir: str = "downloads", probe_network: bool = True
 
     ffmpeg = find_ffmpeg_location() or shutil.which("ffmpeg")
     add("ffmpeg", bool(ffmpeg), ffmpeg or "not found; run ffmpeg-install or 'brew install ffmpeg'")
+
+    runtimes = find_js_runtimes()
+    add(
+        "JavaScript runtime",
+        bool(runtimes),
+        ", ".join(f"{name} ({config['path']})" for name, config in runtimes.items())
+        if runtimes
+        else "missing; YouTube downloads may fail with HTTP 403. Run 'brew install deno'.",
+    )
+    ejs_ready = has_ejs_scripts()
+    add("yt-dlp-ejs", ejs_ready, "ready" if ejs_ready else "missing; reinstall with pip install -r requirements.txt")
 
     add("mutagen", HAS_MUTAGEN, "ready" if HAS_MUTAGEN else "missing; tags will not be written")
     add("Pillow", HAS_PILLOW, "ready" if HAS_PILLOW else "optional; artwork resizing disabled")
@@ -2301,6 +2605,7 @@ def apply_library_metadata(
     update_artwork: bool,
     overwrite_artwork: bool,
     lyrics_enabled: bool,
+    lyrics_style: str = "plain",
 ) -> None:
     if not HAS_MUTAGEN:
         return
@@ -2311,7 +2616,7 @@ def apply_library_metadata(
         duration_ms=metadata.duration_ms,
         cover_url=metadata.artwork_url if update_artwork else None,
     )
-    lyrics = fetch_lyrics(track) if lyrics_enabled else None
+    lyrics = fetch_lyrics_payload(track) if lyrics_enabled else None
     cover = None
     if update_artwork and metadata.artwork_url:
         existing_cover = _has_embedded_cover(path)
@@ -2319,13 +2624,14 @@ def apply_library_metadata(
             cover = cover_bytes(path, track)
     suffix = path.suffix.lower()
     if suffix == ".mp3":
-        write_mp3_tags(path, track, metadata.track_number, cover, lyrics)
+        write_mp3_tags(path, track, metadata.track_number, cover)
     elif suffix == ".m4a":
-        write_m4a_tags(path, track, metadata.track_number, cover, lyrics)
+        write_m4a_tags(path, track, metadata.track_number, cover)
     elif suffix == ".flac":
-        write_flac_tags(path, track, metadata.track_number, cover, lyrics)
+        write_flac_tags(path, track, metadata.track_number, cover)
     elif suffix in {".opus", ".ogg"}:
-        write_ogg_tags(path, track, metadata.track_number, lyrics)
+        write_ogg_tags(path, track, metadata.track_number)
+    embed_lyrics(path, lyrics, lyrics_style)
 
 
 def _has_embedded_cover(path: Path) -> bool:
@@ -2363,6 +2669,7 @@ def repair_library(args: argparse.Namespace) -> int:
     recursive = getattr(args, "recursive", True)
     apply = getattr(args, "apply", False)
     lyrics_enabled = getattr(args, "lyrics", True)
+    lyrics_style = getattr(args, "lyrics_style", "plain")
     update_artwork = getattr(args, "artwork", True)
     overwrite_artwork = getattr(args, "overwrite_artwork", False)
     min_confidence = getattr(args, "min_confidence", DEFAULT_MIN_CONFIDENCE)
@@ -2419,7 +2726,7 @@ def repair_library(args: argparse.Namespace) -> int:
         final_path = path
         if apply:
             try:
-                apply_library_metadata(path, match, update_artwork, overwrite_artwork, lyrics_enabled)
+                apply_library_metadata(path, match, update_artwork, overwrite_artwork, lyrics_enabled, lyrics_style)
                 if rename_pattern:
                     new_stem = render_rename_pattern(rename_pattern, match, match.track_number)
                     if new_stem:
@@ -2459,6 +2766,65 @@ def repair_library(args: argparse.Namespace) -> int:
 
     print(f"{'Repaired' if apply else 'Matched'}: {ok}/{total}", flush=True)
     emit_json_event(json_events, "collection_finished", title="Library Cleanup", ok_count=ok, failed_count=failed)
+    return 0 if failed == 0 else 1
+
+
+def lrc_sidecar_pairs(folders: list[str], recursive: bool) -> list[tuple[Path, Path]]:
+    """Audio files that have a same-named .lrc file next to them."""
+    pairs: list[tuple[Path, Path]] = []
+    for path in iter_library_files(folders, recursive):
+        sidecar = path.with_suffix(".lrc")
+        if sidecar.is_file():
+            pairs.append((path, sidecar))
+    return pairs
+
+
+def embed_lrc_sidecars(args: argparse.Namespace) -> int:
+    """Move lyrics from .lrc sidecar files into the audio files themselves."""
+    json_events = getattr(args, "json_events", False)
+    keep = getattr(args, "keep_lrc", False)
+    style = getattr(args, "lyrics_style", "plain")
+    pairs = lrc_sidecar_pairs(list(args.folders), getattr(args, "recursive", True))
+    total = len(pairs)
+    print(f"Found {total} audio file(s) with .lrc lyrics.", flush=True)
+    emit_json_event(json_events, "collection_start", title="Embed Lyrics", track_count=total, selected_count=total, total=total)
+
+    ok = 0
+    failed = 0
+    for index, (audio, sidecar) in enumerate(pairs, 1):
+        if STOP_EVENT.is_set():
+            break
+        key = f"lyrics:{audio}"
+        try:
+            lyrics = lyrics_from_lrc_text(sidecar.read_text(encoding="utf-8", errors="replace"))
+            if not embed_lyrics(audio, lyrics, style):
+                raise ValueError("format does not support embedded lyrics" if lyrics else "lyrics file is empty")
+            if not keep:
+                sidecar.unlink(missing_ok=True)
+            ok += 1
+            state, message = "succeeded", "Embedded" if keep else "Embedded; removed .lrc"
+        except Exception as exc:
+            failed += 1
+            state, message = "failed", str(exc)
+            LOG.warning("could not embed %s into %s: %s", sidecar, audio, exc)
+        emit_json_event(
+            json_events,
+            "track_progress",
+            key=key,
+            index=index,
+            total=total,
+            label=audio.name,
+            title=audio.stem,
+            artists="",
+            progress=1.0,
+            state=state,
+            message=message,
+            path=str(audio),
+        )
+        print(f"  [{index}/{total}] {message}: {audio.name}", flush=True)
+
+    print(f"Embedded lyrics: {ok}/{total}", flush=True)
+    emit_json_event(json_events, "collection_finished", title="Embed Lyrics", ok_count=ok, failed_count=failed)
     return 0 if failed == 0 else 1
 
 
@@ -2544,6 +2910,8 @@ def doctor() -> int:
         print("Warning: mutagen is missing, so tags will not be written.", flush=True)
     if not HAS_PILLOW:
         print("Note: Pillow is missing, so artwork resizing is disabled.", flush=True)
+    if not find_js_runtimes():
+        print("Warning: no JavaScript runtime found; YouTube may return HTTP 403. Install one with: brew install deno", flush=True)
     return 0
 
 
@@ -2555,6 +2923,18 @@ def doctor() -> int:
 def add_lyrics_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--lyrics", dest="lyrics", action="store_true", default=True, help="Search and apply lyrics.")
     parser.add_argument("--no-lyrics", dest="lyrics", action="store_false", help="Do not search or apply lyrics.")
+    add_lyrics_style_flag(parser)
+
+
+def add_lyrics_style_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--lyrics-style",
+        dest="lyrics_style",
+        choices=LYRICS_STYLES,
+        default="plain",
+        help="plain: readable text in the lyrics tag (Apple Music). synced: timestamped LRC text for players "
+        "that scroll lyrics. MP3 files always get an embedded SYLT timing frame when timing is available.",
+    )
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -2581,8 +2961,8 @@ def create_parser() -> argparse.ArgumentParser:
     download.add_argument("--no-track-number-prefix", dest="track_number_prefix", action="store_false", help="Do not prefix files with their track number.")
     download.add_argument("--allow-closest-match", action="store_true", help="Use the closest duration match if no confident match is found.")
     add_lyrics_flags(download)
-    download.add_argument("--lrc", dest="write_lrc", action="store_true", default=True, help="Write synced lyrics to a .lrc sidecar file.")
-    download.add_argument("--no-lrc", dest="write_lrc", action="store_false", help="Do not write .lrc sidecar files.")
+    download.add_argument("--lrc", dest="write_lrc", action="store_true", default=False, help="Also write synced lyrics to a .lrc sidecar file.")
+    download.add_argument("--no-lrc", dest="write_lrc", action="store_false", help="Do not write .lrc sidecar files (default).")
     download.add_argument("--cookies-browser", dest="cookies_browser", choices=COOKIE_BROWSERS, default=None, help="Load cookies from a browser for yt-dlp.")
     download.add_argument("--artwork-max-size", dest="artwork_max_size", choices=ARTWORK_SIZES, default="unlimited", help="Downscale embedded cover art to this many pixels.")
     download.add_argument("--artwork-jpeg", dest="artwork_jpeg", action="store_true", help="Convert embedded cover art to JPEG.")
@@ -2615,6 +2995,14 @@ def create_parser() -> argparse.ArgumentParser:
     library.add_argument("--rename-pattern", dest="rename_pattern", default=None, help="Rename applied files using this pattern.")
     library.add_argument("--json-events", dest="json_events", action="store_true", help="Emit JSON progress events.")
     library.add_argument("--debug-log", action="store_true", help="Write verbose diagnostics to the log file.")
+
+    embed_lrc = subparsers.add_parser("embed-lrc", help="Embed existing .lrc sidecar lyrics into their audio files.")
+    embed_lrc.add_argument("folders", nargs="+", help="Folders to scan.")
+    embed_lrc.add_argument("--recursive", dest="recursive", action="store_true", default=True, help="Include subfolders.")
+    embed_lrc.add_argument("--no-recursive", dest="recursive", action="store_false", help="Do not include subfolders.")
+    embed_lrc.add_argument("--keep-lrc", action="store_true", help="Keep the .lrc files after embedding.")
+    add_lyrics_style_flag(embed_lrc)
+    embed_lrc.add_argument("--json-events", dest="json_events", action="store_true", help="Emit JSON progress events.")
 
     return parser
 
@@ -2791,6 +3179,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "library":
         try:
             return repair_library(args)
+        except KeyboardInterrupt:
+            print("Cancelled.", flush=True)
+            return 130
+
+    if args.command == "embed-lrc":
+        try:
+            return embed_lrc_sidecars(args)
         except KeyboardInterrupt:
             print("Cancelled.", flush=True)
             return 130

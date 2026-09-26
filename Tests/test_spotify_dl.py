@@ -292,12 +292,19 @@ class ResumeMetadataTests(unittest.TestCase):
 
 
 class TieredSearchTests(unittest.TestCase):
-    def test_ytmusic_search_is_tried_first(self):
-        track = dl.Track(name="Song", artists="Artist")
+    def test_plain_search_is_tried_first_and_ytmusic_stays_a_fallback(self):
+        track = dl.Track(name="Song - 2015 Remaster", artists="Artist, Guest")
         queries = dl.youtube_search_queries(track, limit=5)
-        self.assertTrue(queries[0].startswith("https://music.youtube.com/search?"))
-        self.assertIn("Artist+-+Song", queries[0])
-        self.assertTrue(queries[1].startswith("ytsearch5:"))
+        self.assertEqual(queries[0], "ytsearch5:Artist, Guest - Song")
+        ytmusic = [query for query in queries if query.startswith("https://music.youtube.com/search?")]
+        self.assertEqual(len(ytmusic), 1)
+        self.assertIn("Artist+-+Song", ytmusic[0])
+        self.assertNotIn("#songs", ytmusic[0])
+
+    def test_search_is_flat_so_results_do_not_load_video_pages(self):
+        options = dl.youtube_search_options()
+        self.assertEqual(options["extract_flat"], "in_playlist")
+        self.assertTrue(options["ignoreerrors"])
 
     def test_ytmusic_fallback_to_ytsearch(self):
         track = dl.Track(name="Song", artists="Artist")
@@ -335,6 +342,26 @@ class TieredSearchTests(unittest.TestCase):
         self.assertIn("extractor_args", retry)
         self.assertNotEqual(initial["format"], retry["format"])
 
+    def test_retry_clients_never_need_po_tokens(self):
+        token_clients = {"android", "ios", "mweb", "web_safari", "android_vr", "web", "web_music"}
+        for _, clients, _ in dl.YOUTUBE_DOWNLOAD_STRATEGIES:
+            self.assertFalse(token_clients & set(clients or []), clients)
+        self.assertEqual(len(dl.YOUTUBE_RETRY_METHODS), 6)
+
+    def test_js_runtimes_are_passed_to_yt_dlp_when_found(self):
+        runtimes = {"node": {"path": "/opt/homebrew/bin/node"}}
+        with patch.object(dl, "find_js_runtimes", return_value=runtimes):
+            options = dl.youtube_attempt_options({"quiet": True}, attempt=0, audio=True)
+        self.assertEqual(options["js_runtimes"], runtimes)
+
+    def test_friendly_errors_explain_bot_checks_and_403s(self):
+        bot = "ERROR: [youtube] ZxgMGk9JPVA: Sign in to confirm you\u2019re not a bot. Use --cookies-from-browser"
+        self.assertIn("Browser cookies", dl.friendly_error(bot))
+        forbidden = "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+        with patch.object(dl, "find_js_runtimes", return_value={}):
+            self.assertIn("brew install deno", dl.friendly_error(forbidden))
+        self.assertEqual(dl.friendly_error("something else"), "something else")
+
     def test_download_retries_default_to_two_and_are_customizable(self):
         default_args = dl.parse_args(["download", "https://youtu.be/example"])
         custom_args = dl.parse_args(["download", "--retries", "4", "https://youtu.be/example"])
@@ -342,16 +369,7 @@ class TieredSearchTests(unittest.TestCase):
         self.assertEqual(dl.RunOptions.from_args(default_args).retries, 2)
         self.assertEqual(dl.RunOptions.from_args(custom_args).retries, 4)
 
-    def test_track_retry_uses_next_search_and_download_method(self):
-        track = dl.Track(name="Song", artists="Artist", duration_ms=120_000)
-        candidate = {
-            "id": "abc",
-            "title": "Artist - Song",
-            "uploader": "Artist",
-            "duration": 120,
-        }
-        used_options = []
-
+    def _fake_youtube_dl(self, used_options, failures):
         class FakeYoutubeDL:
             def __init__(self, options):
                 self.options = options
@@ -364,31 +382,83 @@ class TieredSearchTests(unittest.TestCase):
                 return False
 
             def download(self, urls):
+                if failures:
+                    raise RuntimeError(failures.pop(0))
                 output = Path(str(self.options["outtmpl"]).replace("%(ext)s", "mp3"))
                 output.write_bytes(b"audio")
 
+        return FakeYoutubeDL
+
+    def _download(self, track, retries, search_results, failures):
+        used_options = []
         with (
             tempfile.TemporaryDirectory() as tmp,
-            patch.object(dl, "youtube_candidates_for_query", side_effect=[[], [candidate]]) as search,
-            patch.object(dl, "YoutubeDL", FakeYoutubeDL),
+            patch.object(dl, "youtube_candidates_for_query", side_effect=search_results) as search,
+            patch.object(dl, "YoutubeDL", self._fake_youtube_dl(used_options, failures)),
             patch.object(dl, "apply_track_lyrics", return_value=None),
             patch.object(dl, "tag"),
+            patch.object(dl.STOP_EVENT, "wait", return_value=False),
         ):
             result = dl.download_track(
                 track,
                 Path(tmp),
                 None,
                 1,
-                dl.RunOptions(retries=1, lyrics=False),
+                dl.RunOptions(retries=retries, lyrics=False),
                 None,
                 {},
             )
+        return result, search, used_options
+
+    def test_track_search_tries_every_route_before_downloading(self):
+        track = dl.Track(name="Song", artists="Artist", duration_ms=120_000)
+        candidate = {"id": "abc", "title": "Artist - Song", "uploader": "Artist", "duration": 120}
+
+        result, search, used_options = self._download(track, 0, [[], [candidate]], [])
 
         self.assertTrue(result.ok)
         self.assertEqual(search.call_count, 2)
         self.assertEqual(len(used_options), 1)
-        self.assertIn("extractor_args", used_options[0])
-        self.assertIn("alternate clients", result.detail)
+        self.assertNotIn("extractor_args", used_options[0])
+
+    def test_forbidden_download_retries_same_video_with_other_clients(self):
+        track = dl.Track(name="Song", artists="Artist", duration_ms=120_000)
+        candidate = {"id": "abc", "title": "Artist - Song", "uploader": "Artist", "duration": 120}
+
+        result, search, used_options = self._download(
+            track, 1, [[candidate]], ["unable to download video data: HTTP Error 403: Forbidden"]
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(search.call_count, 1)
+        self.assertEqual(len(used_options), 2)
+        self.assertIn("extractor_args", used_options[1])
+        self.assertIn("TV client", result.detail)
+
+    def test_unavailable_video_is_replaced_by_the_next_match(self):
+        track = dl.Track(name="Song", artists="Artist", duration_ms=120_000)
+        first = {"id": "gone", "title": "Artist - Song", "uploader": "Artist", "duration": 120}
+        second = {"id": "good", "title": "Artist - Song (Audio)", "uploader": "Artist", "duration": 121}
+
+        result, search, used_options = self._download(
+            track, 1, [[first, second], [first, second]], ["ERROR: [youtube] gone: Video unavailable"]
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(search.call_count, 2)
+        self.assertEqual(len(used_options), 2)
+
+    def test_no_confident_match_does_not_repeat_every_search(self):
+        track = dl.Track(name="Song", artists="Artist", duration_ms=120_000)
+        wrong = {"id": "x", "title": "Other Band - Other Song", "uploader": "Other", "duration": 120}
+        routes = len(dl.youtube_search_queries(track))
+
+        result, search, used_options = self._download(track, 2, [[wrong]] * routes, [])
+
+        self.assertFalse(result.ok)
+        self.assertEqual(search.call_count, routes)
+        self.assertEqual(used_options, [])
+        self.assertIn("no confident", result.detail)
 
 
 class FFmpegInstallTests(unittest.TestCase):
@@ -409,19 +479,21 @@ class SidecarAndRenameTests(unittest.TestCase):
         with dl.LYRICS_CACHE_LOCK:
             dl.LYRICS_CACHE.clear()
 
-    def test_lrc_sidecar_written_on_download(self):
+    def test_lrc_sidecar_written_only_when_requested(self):
+        record = {"plainLyrics": "Plain", "syncedLyrics": "[00:01.00]Synced line"}
+        track = dl.Track(name="Song", artists="Artist", duration_ms=123_000)
         with tempfile.TemporaryDirectory() as tmp:
             audio = Path(tmp) / "song.mp3"
             audio.write_bytes(b"audio")
-            track = dl.Track(name="Song", artists="Artist", duration_ms=123_000)
-            options = dl.RunOptions(lyrics=True, write_lrc=True)
-            record = {"plainLyrics": "Plain", "syncedLyrics": "[00:01.00]Synced line"}
             with patch.object(dl, "_lyrics_record", return_value=record):
-                plain = dl.apply_track_lyrics(audio, track, options)
+                default_lyrics = dl.apply_track_lyrics(audio, track, dl.RunOptions(lyrics=True))
+            self.assertFalse(audio.with_suffix(".lrc").exists())
+            self.assertEqual(default_lyrics.plain, "Plain")
+            self.assertEqual(default_lyrics.synced, "[00:01.00]Synced line")
 
-            self.assertEqual(plain, "Plain")
+            with patch.object(dl, "_lyrics_record", return_value=record):
+                dl.apply_track_lyrics(audio, track, dl.RunOptions(lyrics=True, write_lrc=True))
             sidecar = audio.with_suffix(".lrc")
-            self.assertTrue(sidecar.exists())
             self.assertEqual(sidecar.read_text(encoding="utf-8"), "[00:01.00]Synced line")
 
     def test_library_rename_applies_pattern(self):
@@ -521,3 +593,112 @@ class PreviewHealthHistoryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TitleCleanupTests(unittest.TestCase):
+    def test_edition_tails_are_removed(self):
+        cases = {
+            "Run to the Hills - 2015 Remaster": "Run to the Hills",
+            "Paint It, Black - Remastered 2011": "Paint It, Black",
+            "Song - 2009 Remastered Version": "Song",
+            "Song (Mono Version)": "Song",
+            "Song - Radio Edit": "Song",
+            "Song (feat. Someone Else)": "Song",
+            "Song - From \"Top Gun\" Original Motion Picture Soundtrack": "Song",
+            "Song [40th Anniversary Edition]": "Song",
+        }
+        for raw, expected in cases.items():
+            self.assertEqual(dl.clean_track_title(raw), expected, raw)
+
+    def test_real_version_tails_are_kept(self):
+        for raw in ("Song - Live at Wembley", "Song - Acoustic", "Song (Remix)", "Song - Sped Up", "Remaster"):
+            self.assertEqual(dl.clean_track_title(raw), raw)
+
+    def test_remastered_spotify_title_matches_plain_youtube_uploads(self):
+        track = dl.Track(name="Run to the Hills - 2015 Remaster", artists="Iron Maiden", duration_ms=233_000)
+        candidates = [
+            {"id": "a", "title": "Iron Maiden - Run To The Hills - Remastered", "channel": "Fan", "duration": 234},
+            {"id": "b", "title": "Iron Maiden - Run To The Hills (Official Video)", "channel": "Iron Maiden", "duration": 232},
+            {"id": "c", "title": "Iron Maiden - Run to the Hills [Original 1982 Studio Recording]", "channel": "Fan", "duration": 234},
+        ]
+        chosen, reason = dl.choose_youtube_candidate(candidates, track)
+        self.assertIsNotNone(chosen, reason)
+
+    def test_studio_track_prefers_studio_upload_over_live_one(self):
+        track = dl.Track(name="Cum on Feel the Noize", artists="Quiet Riot", duration_ms=289_000)
+        candidates = [
+            {"id": "live", "title": "Quiet Riot - Cum On Feel The Noize (Live 1983)", "channel": "Quiet Riot", "duration": 289},
+            {"id": "studio", "title": "Quiet Riot - Cum On Feel The Noize (Official Video)", "channel": "QuietRiotVEVO", "duration": 307},
+        ]
+        chosen, _ = dl.choose_youtube_candidate(candidates, track)
+        self.assertEqual(chosen["id"], "studio")
+
+
+class EmbeddedLyricsTests(unittest.TestCase):
+    SYNCED = "[ar: Artist]\n[00:01.50]First line\n[00:03.00][00:10.25]Chorus\n"
+
+    def setUp(self):
+        with dl.LYRICS_CACHE_LOCK:
+            dl.LYRICS_CACHE.clear()
+
+    def test_parse_lrc_expands_repeated_timestamps_and_skips_metadata(self):
+        self.assertEqual(
+            dl.parse_lrc(self.SYNCED),
+            [("First line", 1500), ("Chorus", 3000), ("Chorus", 10250)],
+        )
+        self.assertEqual(dl.strip_lrc_timestamps(self.SYNCED), "First line\nChorus")
+
+    def test_lyrics_style_controls_standard_tag_text(self):
+        lyrics = dl.Lyrics(plain=None, synced=self.SYNCED)
+        self.assertEqual(lyrics.text("plain"), "First line\nChorus")
+        self.assertEqual(lyrics.text("synced"), self.SYNCED)
+
+    def test_mp3_gets_plain_lyrics_and_sylt_timing_inside_the_file(self):
+        from mutagen.id3 import ID3
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "song.mp3"
+            audio.write_bytes(b"\x00" * 512)
+            self.assertTrue(dl.embed_lyrics(audio, dl.Lyrics(plain="First line\nChorus", synced=self.SYNCED)))
+
+            tags = ID3(str(audio))
+            self.assertEqual(tags.getall("USLT")[0].text, "First line\nChorus")
+            self.assertEqual(tags.getall("SYLT")[0].text[0], ("First line", 1500))
+            self.assertEqual(tags.version[:2], (2, 3))
+
+    def test_embed_lrc_command_moves_sidecars_into_audio_files(self):
+        from mutagen.id3 import ID3
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "Album" / "01. Song - Artist.mp3"
+            audio.parent.mkdir()
+            audio.write_bytes(b"\x00" * 512)
+            audio.with_suffix(".lrc").write_text(self.SYNCED, encoding="utf-8")
+
+            code = dl.main(["embed-lrc", tmp])
+
+            self.assertEqual(code, 0)
+            self.assertFalse(audio.with_suffix(".lrc").exists())
+            self.assertEqual(ID3(str(audio)).getall("USLT")[0].text, "First line\nChorus")
+
+    def test_lyrics_lookup_falls_back_to_search(self):
+        track = dl.Track(name="Run to the Hills - 2015 Remaster", artists="Iron Maiden", duration_ms=233_000)
+
+        class Response:
+            def __init__(self, status, payload):
+                self.status_code = status
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        results = [
+            {"trackName": "Run to the Hills (Live)", "duration": 233, "plainLyrics": "wrong"},
+            {"trackName": "Run to the Hills", "duration": 250, "plainLyrics": "too long"},
+            {"trackName": "Run to the Hills (2015 Remaster)", "duration": 234, "plainLyrics": "right", "syncedLyrics": "[00:01.00]right"},
+        ]
+        with patch.object(dl.req, "get", side_effect=[Response(404, {}), Response(200, results)]):
+            lyrics = dl.fetch_lyrics_payload(track)
+
+        self.assertEqual(lyrics.plain, "right")
+        self.assertEqual(lyrics.synced, "[00:01.00]right")
