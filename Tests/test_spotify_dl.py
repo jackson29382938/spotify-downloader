@@ -3,6 +3,7 @@ import io
 import json
 import tempfile
 import unittest
+from concurrent.futures import wait as real_wait
 from pathlib import Path
 from unittest.mock import patch
 
@@ -349,6 +350,29 @@ class ResumeMetadataTests(unittest.TestCase):
 
 
 class TieredSearchTests(unittest.TestCase):
+    def test_playlist_submits_bounded_work(self):
+        collection = dl.SpotifyCollection(
+            name="Many", use_subfolder=True,
+            tracks=[dl.Track(name=f"Song {index}", artists="Artist") for index in range(30)],
+        )
+        peak_pending = 0
+
+        def measure_pending(futures, **kwargs):
+            nonlocal peak_pending
+            peak_pending = max(peak_pending, len(futures))
+            return real_wait(futures, **kwargs)
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(dl, "download_track", side_effect=lambda track, *_: dl.DownloadResult(True, track.name)),
+            patch.object(dl, "wait", side_effect=measure_pending),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            ok, failed, _, _ = dl.download_collection(collection, dl.RunOptions(), tmp, threads=4, start=1)
+
+        self.assertEqual((ok, failed), (30, 0))
+        self.assertLessEqual(peak_pending, 8)
+
     def test_failed_forced_replacement_keeps_existing_audio(self):
         with tempfile.TemporaryDirectory() as tmp:
             original = Path(tmp) / "Song - Artist.mp3"

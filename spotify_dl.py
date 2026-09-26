@@ -32,7 +32,7 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -1876,7 +1876,8 @@ def download_collection(
     options.ffmpeg_location = options.ffmpeg_location or find_ffmpeg_location()
     manifest_done = load_manifest(output_dir)
     print(f"Downloading to: {output_dir}", flush=True)
-    print(f"Using {max(1, threads)} worker(s)", flush=True)
+    workers = min(16, max(1, threads))
+    print(f"Using {workers} worker(s)", flush=True)
     if manifest_done and options.overwrite == "skip":
         print(f"Resume manifest: {len(manifest_done)} completed track(s)", flush=True)
 
@@ -1924,21 +1925,36 @@ def download_collection(
             track_progress_event(options, track, pos, len(collection.tracks), "failed", 1.0, result.detail)
             print(f"  [{index}/{len(collection.tracks)}] Failed: {result.label}: {result.detail}", flush=True)
 
-    if threads <= 1:
+    if workers == 1:
         for index, track in selected_tracks:
             print(f"  [{index}/{len(collection.tracks)}] {track.artists} - {track.name}", flush=True)
             _, _, result = run_one(index, track)
             handle_result(index, track, result)
     else:
-        with ThreadPoolExecutor(max_workers=max(1, threads)) as executor:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            selected = iter(selected_tracks)
             futures = {}
-            for index, track in selected_tracks:
+
+            def queue_next() -> bool:
+                try:
+                    index, track = next(selected)
+                except StopIteration:
+                    return False
                 print(f"  [{index}/{len(collection.tracks)}] queued {track.artists} - {track.name}", flush=True)
                 track_progress_event(options, track, index if collection.use_subfolder else None, len(collection.tracks), "queued", 0.0, "Queued")
                 futures[executor.submit(run_one, index, track)] = (index, track)
-            for future in as_completed(futures):
-                index, track, result = future.result()
-                handle_result(index, track, result)
+                return True
+
+            for _ in range(workers * 2):
+                if not queue_next():
+                    break
+            while futures:
+                finished, _ = wait(futures, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    futures.pop(future)
+                    index, track, result = future.result()
+                    handle_result(index, track, result)
+                    queue_next()
 
     fail_count = len(failed)
     print(f"Downloaded: {ok}/{len(selected_tracks)}", flush=True)
@@ -2611,7 +2627,7 @@ def create_parser() -> argparse.ArgumentParser:
     download.add_argument("--media", choices=("audio", "video"), default="audio", help="Download audio, or full videos for YouTube URLs.")
     download.add_argument("-f", "--format", default="mp3", dest="fmt", choices=("mp3", "m4a", "flac", "opus", "ogg", "wav"), help="Audio output format.")
     download.add_argument("-b", "--bitrate", default="192k", help="Audio quality, e.g. 192k, 320k, 0.")
-    download.add_argument("--threads", type=int, default=4, help="Parallel downloads per playlist.")
+    download.add_argument("--threads", type=int, choices=range(1, 17), default=4, help="Parallel downloads per playlist (1-16).")
     download.add_argument("--retries", type=int, choices=range(0, 6), default=2, help="Additional attempts per failed track (0-5), using different search and download methods.")
     download.add_argument("--overwrite", choices=("skip", "metadata", "force"), default="skip", help="How to handle existing files.")
     download.add_argument("--track-number-prefix", dest="track_number_prefix", action="store_true", default=True, help="Prefix files with their track number.")
