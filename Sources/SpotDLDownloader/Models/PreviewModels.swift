@@ -192,6 +192,7 @@ struct DownloadProgressSummary: Equatable {
 
 struct DownloadProgressEvent: Decodable {
     let event: String
+    let sourceURL: String?
     let key: String?
     let index: Int?
     let total: Int?
@@ -214,6 +215,7 @@ struct DownloadProgressEvent: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case event
+        case sourceURL = "source_url"
         case key
         case index
         case total

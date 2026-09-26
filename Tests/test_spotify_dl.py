@@ -588,10 +588,12 @@ class PreviewHealthHistoryTests(unittest.TestCase):
             if line.startswith("{")
         ]
         self.assertEqual(exit_code, 0)
-        self.assertEqual(events[-1]["event"], "track_progress")
-        self.assertEqual(events[-1]["state"], "succeeded")
-        self.assertEqual(events[-1]["path"], "/tmp/music/Song.mp3")
-        self.assertTrue(events[-1]["created_this_run"])
+        completed = next(event for event in events if event.get("state") == "succeeded")
+        self.assertEqual(completed["path"], "/tmp/music/Song.mp3")
+        self.assertTrue(completed["created_this_run"])
+        self.assertEqual(events[-1]["event"], "source_finished")
+        self.assertEqual(events[-1]["source_url"], url)
+        self.assertEqual(events[-1]["failed_count"], 0)
 
     def test_append_history_writes_jsonl_record(self):
         with tempfile.TemporaryDirectory() as tmp:

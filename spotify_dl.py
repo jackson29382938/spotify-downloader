@@ -2638,11 +2638,18 @@ def run_download(args: argparse.Namespace) -> int:
     options_output_dir.set(str(Path(args.output_dir).expanduser()))
 
     total_failures = 0
+    def finish_source(url: str, ok: int, failed: int) -> None:
+        emit_json_event(
+            options.json_events, "source_finished", source_url=url,
+            ok_count=ok, failed_count=failed,
+        )
+
     for url_index, url in enumerate(args.urls, 1):
         if is_spotify_url(url):
             if args.media == "video":
                 print("Spotify links can only be downloaded as audio.", file=sys.stderr, flush=True)
                 total_failures += 1
+                finish_source(url, 0, 1)
                 continue
 
             print(f"Fetching Spotify metadata: {url}", flush=True)
@@ -2651,10 +2658,12 @@ def run_download(args: argparse.Namespace) -> int:
             except Exception as exc:
                 print(f"Failed to fetch Spotify metadata: {exc}", file=sys.stderr, flush=True)
                 total_failures += 1
+                finish_source(url, 0, 1)
                 continue
 
             print_track_list(collection)
             if args.dry_run:
+                finish_source(url, len(collection.tracks), 0)
                 continue
 
             try:
@@ -2677,6 +2686,7 @@ def run_download(args: argparse.Namespace) -> int:
                     "failed": failed,
                 }
             )
+            finish_source(url, ok, failures)
             continue
 
         if is_youtube_url(url):
@@ -2686,10 +2696,12 @@ def run_download(args: argparse.Namespace) -> int:
             except Exception as exc:
                 print(f"Failed to fetch YouTube metadata: {exc}", file=sys.stderr, flush=True)
                 total_failures += 1
+                finish_source(url, 0, 1)
                 continue
 
             print_youtube_info(youtube_info, args.media)
             if args.dry_run:
+                finish_source(url, 1, 0)
                 continue
 
             youtube_title_text = str(youtube_info.get("title") or "YouTube audio")
@@ -2759,11 +2771,13 @@ def run_download(args: argparse.Namespace) -> int:
                     "failed": [] if result.ok else [result.detail],
                 }
             )
+            finish_source(url, 1 if result.ok else 0, 0 if result.ok else 1)
             continue
 
         expected = "Spotify or YouTube URL" if args.media == "audio" else "YouTube URL"
         print(f"Unsupported URL, expected a {expected}: {url}", file=sys.stderr, flush=True)
         total_failures += 1
+        finish_source(url, 0, 1)
 
     return 1 if total_failures else 0
 

@@ -3,6 +3,16 @@ import XCTest
 @testable import SpotDLDownloader
 
 final class DownloadServiceTests: XCTestCase {
+    @MainActor func testChangedEditorLinksTakePrecedenceOverOldPreview() {
+        let selected = DownloadViewModel.selectedQueries(
+            editor: ["https://youtu.be/new"],
+            previewed: ["https://youtu.be/old"],
+            queue: [DownloadQueueItem(url: "https://youtu.be/old")],
+            override: nil
+        )
+        XCTAssertEqual(selected, ["https://youtu.be/new"])
+    }
+
     func testOutputLinesPreserveUtf8AcrossReadBoundaries() {
         var lines = ProcessOutputLines()
         let bytes = Data("Café\nlast".utf8)
