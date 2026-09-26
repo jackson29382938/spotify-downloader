@@ -9,6 +9,9 @@ from unittest.mock import patch
 
 import spotify_dl as dl
 
+# Tests should not wait between simulated YouTube downloads.
+dl.YOUTUBE_GATE.min_spacing = 0
+
 # Forty silent MPEG-1 Layer III frames: small, but readable as real audio.
 SILENT_MP3 = (b"\xff\xfb\x90\x64" + b"\x00" * 413) * 40
 
@@ -1105,3 +1108,79 @@ class ReviewFollowUpTests(unittest.TestCase):
             self.assertEqual(dl.load_preview_snapshot(url), collection)
             self.assertIsNone(dl.load_preview_snapshot(url, max_age=-1))
             self.assertIsNone(dl.load_preview_snapshot("https://open.spotify.com/playlist/other"))
+
+
+class RateLimitTests(unittest.TestCase):
+    def test_gate_pauses_everyone_after_a_bot_check_then_gives_up(self):
+        gate = dl.YouTubeGate(min_spacing=0, first_cooldown=0.05, give_up_after=2)
+        with contextlib.redirect_stdout(io.StringIO()):
+            first = gate.wait_turn()
+            gate.report_bot_check(first)
+            gate.report_bot_check(first)  # same pause: counted once
+            self.assertEqual(gate.strikes, 1)
+            second = gate.wait_turn()
+            self.assertGreaterEqual(second - first, 0.05)
+            gate.report_bot_check(second)
+            third = gate.wait_turn()
+            gate.report_bot_check(third)
+        self.assertTrue(gate.gave_up)
+
+    def test_success_resets_the_gate(self):
+        gate = dl.YouTubeGate(min_spacing=0, first_cooldown=0.01)
+        with contextlib.redirect_stdout(io.StringIO()):
+            gate.report_bot_check(gate.wait_turn())
+        gate.report_success()
+        self.assertEqual(gate.strikes, 0)
+        self.assertFalse(gate.gave_up)
+
+    def test_blocked_gate_fails_remaining_tracks_without_searching(self):
+        gate = dl.YouTubeGate(min_spacing=0)
+        gate.gave_up = True
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(dl, "YOUTUBE_GATE", gate),
+            patch.object(dl, "youtube_candidates_for_query") as search,
+        ):
+            result = dl.download_track(dl.Track(name="Song", artists="A"), Path(tmp), None, 1, dl.RunOptions(), None, {})
+        self.assertFalse(result.ok)
+        self.assertIn("Browser cookies", result.detail)
+        search.assert_not_called()
+
+    def test_spotify_get_waits_out_rate_limits(self):
+        class Response:
+            def __init__(self, status):
+                self.status_code = status
+                self.headers = {"Retry-After": "0"}
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise dl.req.HTTPError(str(self.status_code))
+
+        responses = [Response(429), Response(503), Response(200)]
+        with patch.object(dl.req, "get", side_effect=responses) as get:
+            self.assertEqual(dl.spotify_get("https://open.spotify.com/embed/track/x").status_code, 200)
+        self.assertEqual(get.call_count, 3)
+
+    def test_placeholder_tracks_are_resolved_before_searching(self):
+        placeholder = dl.placeholder_track("abc123")
+        real = dl.Track(name="Do You Believe In Love", artists="Huey Lewis & The News", spotify_id="abc123", duration_ms=209_000)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(dl, "fetch_track_by_id", return_value=real),
+            patch.object(dl, "enriched_track", side_effect=lambda track, _: track),
+            patch.object(dl, "find_youtube_candidate", return_value=(None, "no confident title and artist match")) as find,
+        ):
+            result = dl.download_track(placeholder, Path(tmp), 196, 271, dl.RunOptions(retries=0), None, {})
+        self.assertEqual(find.call_args[0][0].artists, "Huey Lewis & The News")
+        self.assertIn("Huey Lewis", result.label)
+
+    def test_unresolvable_placeholder_fails_fast_with_a_clear_reason(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(dl, "fetch_track_by_id", side_effect=RuntimeError("429")),
+            patch.object(dl, "youtube_candidates_for_query") as search,
+        ):
+            result = dl.download_track(dl.placeholder_track("abc123"), Path(tmp), 1, 1, dl.RunOptions(), None, {})
+        self.assertFalse(result.ok)
+        self.assertIn("Spotify did not return", result.detail)
+        search.assert_not_called()

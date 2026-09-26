@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import platform
+import random
 import re
 import shutil
 import signal
@@ -440,22 +441,44 @@ def is_youtube_url(url: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def spotify_get(url: str, *, headers: dict[str, str] | None = None, timeout: int = 20) -> req.Response:
-    request_headers = {"User-Agent": USER_AGENT, **(headers or {})}
-    last_response: req.Response | None = None
-    for attempt in range(4):
-        response = req.get(url, headers=request_headers, timeout=timeout)
-        last_response = response
-        if response.status_code != 429:
-            response.raise_for_status()
-            return response
-        delay = 1.5 ** attempt
-        LOG.warning("Spotify rate-limited request, retrying in %.1fs: %s", delay, url)
-        time.sleep(delay)
+SPOTIFY_RETRY_ATTEMPTS = 6
 
-    assert last_response is not None
-    last_response.raise_for_status()
-    return last_response
+
+def retry_after_seconds(response: req.Response, fallback: float) -> float:
+    value = (response.headers.get("Retry-After") or "").strip()
+    if value.isdigit():
+        return min(float(value), 60.0)
+    return fallback
+
+
+def spotify_get(url: str, *, headers: dict[str, str] | None = None, timeout: int = 20) -> req.Response:
+    """GET from Spotify, waiting out rate limits (429) and brief server errors.
+
+    Large playlists need one request per track beyond the first page, so a
+    short retry budget turned rate limits into "Unknown Artist" placeholders.
+    """
+    request_headers = {"User-Agent": USER_AGENT, **(headers or {})}
+    last_error: Exception | None = None
+    for attempt in range(SPOTIFY_RETRY_ATTEMPTS):
+        fallback_delay = min(30.0, 2.0 * 2 ** attempt) + random.uniform(0, 1)
+        try:
+            response = req.get(url, headers=request_headers, timeout=timeout)
+        except (req.ConnectionError, req.Timeout) as exc:
+            last_error = exc
+            delay = fallback_delay
+        else:
+            if response.status_code != 429 and response.status_code < 500:
+                response.raise_for_status()
+                return response
+            last_error = req.HTTPError(f"HTTP {response.status_code} from Spotify", response=response)
+            delay = retry_after_seconds(response, fallback_delay)
+        if attempt == SPOTIFY_RETRY_ATTEMPTS - 1:
+            break
+        LOG.warning("Spotify request failed (%s), retrying in %.1fs: %s", last_error, delay, url)
+        if STOP_EVENT.wait(delay):
+            break
+    assert last_error is not None
+    raise last_error
 
 
 def session_token_from(data: dict) -> str | None:
@@ -683,6 +706,29 @@ def fetch_spclient_track_ids(playlist_id: str, token: str) -> list[str]:
     return track_ids
 
 
+UNKNOWN_ARTIST = "Unknown Artist"
+
+
+def placeholder_track(spotify_id: str) -> Track:
+    return Track(name=f"Track {spotify_id}", artists=UNKNOWN_ARTIST, spotify_id=spotify_id)
+
+
+def is_placeholder_track(track: Track) -> bool:
+    return track.artists == UNKNOWN_ARTIST and track.name == f"Track {track.spotify_id}"
+
+
+def resolve_placeholder_track(track: Track) -> Track | None:
+    """Fetch the real title and artist for a track Spotify did not describe
+    while the playlist was loading. Returns None when it still cannot."""
+    if not track.spotify_id:
+        return None
+    try:
+        return fetch_track_by_id(track.spotify_id)
+    except Exception as exc:
+        LOG.warning("could not resolve placeholder track %s: %s", track.spotify_id, exc)
+        return None
+
+
 def fetch_track_by_id(spotify_id: str) -> Track:
     entity = fetch_embed_entity("track", spotify_id)
     return track_from_entity(entity, album=fetch_track_album(spotify_id), spotify_id=spotify_id)
@@ -716,6 +762,7 @@ def complete_playlist_tracks(
             flush=True,
         )
 
+    failed_ids: list[str] = []
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(fetch_track_by_id, spotify_id): spotify_id for spotify_id in missing_ids}
         for future in as_completed(futures):
@@ -724,11 +771,23 @@ def complete_playlist_tracks(
                 tracks_by_id[spotify_id] = future.result()
             except Exception as exc:
                 LOG.warning("track metadata fetch failed for %s: %s", spotify_id, exc)
-                tracks_by_id[spotify_id] = Track(
-                    name=f"Track {spotify_id}",
-                    artists="Unknown Artist",
-                    spotify_id=spotify_id,
-                )
+                failed_ids.append(spotify_id)
+
+    # Second pass, one at a time: failures are usually rate limits that clear
+    # once the burst is over.
+    if failed_ids:
+        print(f"Retrying details for {len(failed_ids)} track(s) more slowly.", file=sys.stderr, flush=True)
+    for spotify_id in failed_ids:
+        if STOP_EVENT.is_set():
+            break
+        try:
+            tracks_by_id[spotify_id] = fetch_track_by_id(spotify_id)
+        except Exception as exc:
+            LOG.warning("track metadata retry failed for %s: %s", spotify_id, exc)
+        STOP_EVENT.wait(0.5)
+    for spotify_id in failed_ids:
+        # Resolved again at download time; see resolve_placeholder_track.
+        tracks_by_id.setdefault(spotify_id, placeholder_track(spotify_id))
 
     ordered_tracks = [
         cached_tracks.get((spotify_id, index)) or tracks_by_id.get(spotify_id)
@@ -1576,6 +1635,72 @@ VIDEO_SPECIFIC_ERROR_MARKERS = (
 )
 
 
+class YouTubeGate:
+    """Paces YouTube downloads across all worker threads.
+
+    Download starts are spaced out, and a bot check pauses every worker (60 s,
+    then 120 s, 240 s, ...). Once YouTube keeps blocking with no success in
+    between, the gate gives up so the remaining tracks fail fast and can be
+    retried later, instead of making the block worse.
+    """
+
+    def __init__(self, min_spacing: float = 1.5, first_cooldown: float = 60.0, give_up_after: int = 3) -> None:
+        self.min_spacing = min_spacing
+        self.first_cooldown = first_cooldown
+        self.give_up_after = give_up_after
+        self._lock = threading.Lock()
+        self._next_start = 0.0
+        self._cooldown_until = 0.0
+        self._cooldown_started = 0.0
+        self._cooldown = 0.0
+        self.strikes = 0
+        self.gave_up = False
+
+    def wait_turn(self) -> float | None:
+        """Block until this thread may start a YouTube request. Returns the
+        start time, or None when the run was stopped."""
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                delay = max(self._cooldown_until, self._next_start) - now
+                if delay <= 0:
+                    spacing = self.min_spacing * (3 if self.strikes else 1)
+                    self._next_start = now + spacing + random.uniform(0, spacing / 2)
+                    return now
+            if STOP_EVENT.wait(min(delay, 2.0)):
+                return None
+
+    def report_bot_check(self, started_at: float) -> None:
+        with self._lock:
+            if started_at < self._cooldown_started:
+                return  # this request began before the current pause; already counted
+            now = time.monotonic()
+            self.strikes += 1
+            if self.strikes > self.give_up_after:
+                self.gave_up = True
+                return
+            self._cooldown = self.first_cooldown if self._cooldown == 0 else min(self._cooldown * 2, 600.0)
+            self._cooldown_started = now
+            self._cooldown_until = now + self._cooldown
+            cooldown = self._cooldown
+        print(
+            f"YouTube asked to confirm we're not a bot; pausing all downloads for {cooldown:.0f}s.",
+            flush=True,
+        )
+
+    def report_success(self) -> None:
+        with self._lock:
+            self.strikes = 0
+            self._cooldown = 0.0
+
+
+YOUTUBE_GATE = YouTubeGate()
+YOUTUBE_BLOCKED_MESSAGE = (
+    "Not attempted: YouTube kept asking to confirm you're not a bot. Choose your browser under "
+    "Settings > YouTube > Browser cookies, wait a few minutes, then press Retry Failed."
+)
+
+
 def is_bot_check_error(detail: str) -> bool:
     lowered = detail.casefold()
     return "confirm you" in lowered and "not a bot" in lowered
@@ -2044,9 +2169,13 @@ def download_youtube_media(url: str, options: RunOptions) -> DownloadResult:
         if attempt > 0:
             print(f"Retry {attempt}/{options.retries}: {method}", flush=True)
         attempt_options = youtube_attempt_options(ydl_opts, attempt, options.media == "audio")
+        started_at = YOUTUBE_GATE.wait_turn()
+        if started_at is None:
+            return DownloadResult(False, url, "cancelled")
         try:
             with YoutubeDL(attempt_options) as ydl:
                 info = first_youtube_info(ydl.extract_info(url, download=True))
+                YOUTUBE_GATE.report_success()
                 path = downloaded_file_path(info, ydl, preferred_ext)
                 if path is None:
                     error_detail = f"yt-dlp finished but the saved file could not be found in {output_dir}"
@@ -2065,7 +2194,9 @@ def download_youtube_media(url: str, options: RunOptions) -> DownloadResult:
         except Exception as exc:
             error_detail = str(exc).strip()[:700]
             LOG.warning("direct YouTube %s failed for %s: %s", method, url, error_detail[:300])
-            if is_video_specific_error(error_detail):
+            if is_bot_check_error(error_detail):
+                YOUTUBE_GATE.report_bot_check(started_at)
+            elif is_video_specific_error(error_detail):
                 break
 
     return DownloadResult(False, url, friendly_error(error_detail))
@@ -2164,6 +2295,17 @@ def download_track(
         detail = f"metadata refreshed: {existing.name}" if not warning else f"audio kept; {warning}"
         # The file existed before this run, so Cancel & Delete must never remove it.
         return DownloadResult(True, label, detail, str(existing), skipped=True, created_this_run=False, warning=warning)
+    if YOUTUBE_GATE.gave_up:
+        return DownloadResult(False, label, YOUTUBE_BLOCKED_MESSAGE)
+    if is_placeholder_track(track):
+        resolved = resolve_placeholder_track(track)
+        if resolved is None:
+            return DownloadResult(
+                False, label,
+                "Spotify did not return this track's title and artist. Press Retry Failed in a few minutes.",
+            )
+        track = resolved
+        label = f"{track.artists} - {track.name}"
     working_track = enriched_track(track, fallback_cover_url)
     total_attempts = max(1, options.retries + 1)
     reserved_stem: str | None = None
@@ -2237,9 +2379,17 @@ def download_track(
             base_options["cookiesfrombrowser"] = (options.cookies_browser,)
 
         attempt_options = youtube_attempt_options(base_options, attempt, audio=True)
+        if YOUTUBE_GATE.gave_up:
+            error_detail = YOUTUBE_BLOCKED_MESSAGE
+            break
+        started_at = YOUTUBE_GATE.wait_turn()
+        if started_at is None:
+            release_output_stem(output_dir, reserved_stem, options.fmt)
+            return DownloadResult(False, label, "cancelled")
         try:
             with YoutubeDL(attempt_options) as ydl:
                 ydl.download([video_url])
+            YOUTUBE_GATE.report_success()
             final = existing_output(output_dir, reserved_stem, options.fmt)
             if not final:
                 error_detail = f"{method} produced no output file"
@@ -2271,7 +2421,11 @@ def download_track(
         except Exception as exc:
             error_detail = str(exc).strip()[:700]
             LOG.warning("%s download failed for %s: %s", method, label, error_detail[:300])
-            if is_video_specific_error(error_detail):
+            if is_bot_check_error(error_detail):
+                # Switching clients does not help with an IP-level block; the gate
+                # pauses every worker before the next attempt.
+                YOUTUBE_GATE.report_bot_check(started_at)
+            elif is_video_specific_error(error_detail):
                 # This upload is unusable (removed, region-locked, ...); pick another.
                 rejected_ids.add(str(chosen.get("id")))
                 chosen = None
