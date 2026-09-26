@@ -178,34 +178,43 @@ final class DownloadService {
         newProcess.standardOutput = standardOutput
         newProcess.standardError = standardError
 
-        standardOutput.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            output(Self.cleaned(text))
-        }
-
-        standardError.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            output(Self.cleaned(text))
-        }
-
-        newProcess.terminationHandler = { [weak self] process in
-            standardOutput.fileHandleForReading.readabilityHandler = nil
-            standardError.fileHandleForReading.readabilityHandler = nil
-            self?.process = nil
-            completion(process.terminationStatus)
-        }
-
         try newProcess.run()
         process = newProcess
+
+        let readers = DispatchGroup()
+        for pipe in [standardOutput, standardError] {
+            readers.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                var lines = ProcessOutputLines()
+                let handle = pipe.fileHandleForReading
+                while true {
+                    let bytes = handle.availableData
+                    if bytes.isEmpty { break }
+                    for line in lines.append(bytes) {
+                        output(Self.cleaned(line))
+                    }
+                }
+                if let lastLine = lines.finish() {
+                    output(Self.cleaned(lastLine))
+                }
+                readers.leave()
+            }
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            newProcess.waitUntilExit()
+            readers.wait()
+            DispatchQueue.main.async {
+                self?.process = nil
+                completion(newProcess.terminationStatus)
+            }
+        }
     }
 
     func cancel() {
         process?.terminate()
     }
 
-    private func runOneShot(
+    func runOneShot(
         arguments: [String],
         completion: @escaping (Result<String, DownloadServiceError>) -> Void
     ) {
@@ -214,24 +223,41 @@ final class DownloadService {
         newProcess.arguments = arguments
         newProcess.environment = Self.processEnvironment()
 
-        let pipe = Pipe()
-        newProcess.standardOutput = pipe
-        newProcess.standardError = pipe
-
-        newProcess.terminationHandler = { process in
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            if process.terminationStatus == 0 {
-                completion(.success(output))
-            } else {
-                completion(.failure(.commandFailed(output.trimmingCharacters(in: .whitespacesAndNewlines))))
-            }
-        }
+        let standardOutput = Pipe()
+        let standardError = Pipe()
+        newProcess.standardOutput = standardOutput
+        newProcess.standardError = standardError
 
         do {
             try newProcess.run()
         } catch {
             completion(.failure(.launchFailed(error.localizedDescription)))
+            return
+        }
+
+        let readers = DispatchGroup()
+        var outputData = Data()
+        var errorData = Data()
+        readers.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            outputData = standardOutput.fileHandleForReading.readDataToEndOfFile()
+            readers.leave()
+        }
+        readers.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            errorData = standardError.fileHandleForReading.readDataToEndOfFile()
+            readers.leave()
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            newProcess.waitUntilExit()
+            readers.wait()
+            let output = String(decoding: outputData, as: UTF8.self)
+            if newProcess.terminationStatus == 0 {
+                completion(.success(output))
+            } else {
+                let error = String(decoding: errorData, as: UTF8.self)
+                completion(.failure(.commandFailed((error + output).trimmingCharacters(in: .whitespacesAndNewlines))))
+            }
         }
     }
 
@@ -297,6 +323,27 @@ final class DownloadService {
             with: "",
             options: .regularExpression
         )
+    }
+}
+
+struct ProcessOutputLines {
+    private var pending = Data()
+
+    mutating func append(_ bytes: Data) -> [String] {
+        pending.append(bytes)
+        var result: [String] = []
+        while let newline = pending.firstIndex(of: 10) {
+            result.append(String(decoding: pending[..<newline], as: UTF8.self) + "\n")
+            pending.removeSubrange(pending.startIndex...newline)
+        }
+        return result
+    }
+
+    mutating func finish() -> String? {
+        guard !pending.isEmpty else { return nil }
+        let result = String(decoding: pending, as: UTF8.self)
+        pending.removeAll()
+        return result
     }
 }
 

@@ -3,6 +3,7 @@ import io
 import json
 import tempfile
 import unittest
+from concurrent.futures import wait as real_wait
 from pathlib import Path
 from unittest.mock import patch
 
@@ -88,6 +89,17 @@ class SpotifyParsingTests(unittest.TestCase):
 
 
 class YoutubeMatchingTests(unittest.TestCase):
+    def test_strict_match_never_borrows_artist_from_another_result(self):
+        track = dl.Track(name="Song", artists="Correct Artist", duration_ms=180_000)
+        candidates = [
+            {"id": "artist-only", "title": "Other Track", "uploader": "Correct Artist", "duration": 180},
+            {"id": "wrong-artist", "title": "Song", "uploader": "Wrong Artist", "duration": 180},
+        ]
+
+        chosen, _ = dl.choose_youtube_candidate(candidates, track, allow_closest=False)
+
+        self.assertIsNone(chosen)
+
     def test_rejects_title_match_with_wrong_artist_by_default(self):
         track = dl.Track(name="Mi Gente", artists="DJ Goja", duration_ms=115_000)
         candidates = [
@@ -200,6 +212,15 @@ class LyricsTests(unittest.TestCase):
 
 
 class LibraryRepairTests(unittest.TestCase):
+    def test_title_alone_is_not_confident_enough_to_repair_metadata(self):
+        guess = dl.LibraryTrackGuess(path=Path("Song.mp3"), title="Song", artist="")
+        candidate = dl.LibraryMetadata(title="Song", artist="Wrong Artist", source="Apple Music")
+        with (
+            patch.object(dl, "itunes_search_candidates", return_value=[candidate]),
+            patch.object(dl, "musicbrainz_search_candidates", return_value=[]),
+        ):
+            self.assertIsNone(dl.identify_library_metadata(guess))
+
     def test_filename_pairs_support_app_and_common_orders(self):
         pairs = dl.filename_title_artist_pairs(Path("01. Song Name - Artist Name.mp3"))
         self.assertEqual(pairs[0], ("Song Name", "Artist Name"))
@@ -253,21 +274,35 @@ class LibraryRepairTests(unittest.TestCase):
 
 
 class ResumeMetadataTests(unittest.TestCase):
-    def test_manifest_spotify_ids_only_returns_existing_files(self):
+    def test_duplicate_playlist_positions_have_distinct_manifest_keys(self):
+        track = dl.Track(name="Song", artists="Artist", spotify_id="same")
+        self.assertNotEqual(dl.track_key(track, 1), dl.track_key(track, 2))
+
+    def test_corrupt_manifest_line_does_not_hide_later_completed_tracks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "done.mp3").write_bytes(b"x")
+            (folder / dl.MANIFEST_FILENAME).write_text(
+                "not-json\n" + json.dumps({"key": "spotify:done:1", "file": "done.mp3"}) + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(dl.load_manifest(folder)["spotify:done:1"], folder / "done.mp3")
+
+    def test_cached_manifest_tracks_only_returns_existing_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
             (folder / "done.mp3").write_bytes(b"x")
             (folder / dl.MANIFEST_FILENAME).write_text(
                 "\n".join(
                     [
-                        json.dumps({"key": "spotify:done", "file": "done.mp3"}),
-                        json.dumps({"key": "spotify:missing", "file": "missing.mp3"}),
+                        json.dumps({"key": "spotify:done:1", "file": "done.mp3", "track": {"name": "Done", "artists": "Artist"}}),
+                        json.dumps({"key": "spotify:missing:2", "file": "missing.mp3", "track": {"name": "Missing", "artists": "Artist"}}),
                     ]
                 ),
                 encoding="utf-8",
             )
 
-            self.assertEqual(dl.manifest_spotify_ids(folder), {"done"})
+            self.assertEqual(list(dl.load_manifest_tracks(folder, "mp3")), [("done", 1)])
 
     def test_complete_playlist_tracks_skips_metadata_for_manifested_ids(self):
         fetched: list[str] = []
@@ -284,14 +319,110 @@ class ResumeMetadataTests(unittest.TestCase):
                 "playlist",
                 "token",
                 [dl.Track(name="Track id1", artists="Artist", spotify_id="id1")],
-                skip_ids={"id2"},
+                cached_tracks={("id2", 2): dl.Track(name="Track id2", artists="Artist", spotify_id="id2")},
             )
 
         self.assertEqual(fetched, ["id3"])
-        self.assertEqual([track.spotify_id for track in tracks], ["id1", "id3"])
+        self.assertEqual([track.spotify_id for track in tracks], ["id1", "id2", "id3"])
+
+    def test_fetch_spotify_uses_completed_track_metadata_from_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "Playlist"
+            folder.mkdir()
+            (folder / "02. Done - Artist.mp3").write_bytes(b"audio")
+            (folder / dl.MANIFEST_FILENAME).write_text(json.dumps({
+                "key": "spotify:done:2",
+                "file": "02. Done - Artist.mp3",
+                "track": {"name": "Done", "artists": "Artist", "spotify_id": "done"},
+            }) + "\n", encoding="utf-8")
+            entity = {"title": "Playlist", "trackList": [
+                {"title": "First", "artists": [{"name": "Artist"}], "uri": "spotify:track:first"},
+            ]}
+            with (
+                patch.object(dl, "fetch_embed_page", return_value=(entity, "token")),
+                patch.object(dl, "fetch_spclient_track_ids", return_value=["first", "done"]),
+                patch.object(dl, "fetch_track_by_id") as fetch,
+            ):
+                collection = dl.fetch_spotify("https://open.spotify.com/playlist/abc", resume_output_root=tmp, resume_format="mp3")
+
+            fetch.assert_not_called()
+            self.assertEqual([track.name for track in collection.tracks], ["First", "Done"])
 
 
 class TieredSearchTests(unittest.TestCase):
+    def test_playlist_submits_bounded_work(self):
+        collection = dl.SpotifyCollection(
+            name="Many", use_subfolder=True,
+            tracks=[dl.Track(name=f"Song {index}", artists="Artist") for index in range(30)],
+        )
+        peak_pending = 0
+
+        def measure_pending(futures, **kwargs):
+            nonlocal peak_pending
+            peak_pending = max(peak_pending, len(futures))
+            return real_wait(futures, **kwargs)
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(dl, "download_track", side_effect=lambda track, *_: dl.DownloadResult(True, track.name)),
+            patch.object(dl, "wait", side_effect=measure_pending),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            ok, failed, _, _, _ = dl.download_collection(collection, dl.RunOptions(), tmp, threads=4, start=1)
+
+        self.assertEqual((ok, failed), (30, 0))
+        self.assertLessEqual(peak_pending, 8)
+
+    def test_failed_forced_replacement_keeps_existing_audio(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = Path(tmp) / "Song - Artist.mp3"
+            original.write_bytes(b"original")
+            with patch.object(dl, "youtube_candidates_for_query", return_value=[]):
+                result = dl.download_track(
+                    dl.Track(name="Song", artists="Artist"),
+                    Path(tmp), None, 1,
+                    dl.RunOptions(overwrite="force", retries=0, lyrics=False), None, {},
+                )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(original.read_bytes(), b"original")
+
+    def test_successful_forced_replacement_reuses_original_path(self):
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.options = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def download(self, urls):
+                Path(self.options["outtmpl"].replace("%(ext)s", "mp3")).write_bytes(b"replacement")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            original = Path(tmp) / "Song - Artist.mp3"
+            original.write_bytes(b"original")
+            candidate = {"id": "video", "title": "Artist - Song", "uploader": "Artist"}
+            with (
+                patch.object(dl, "youtube_candidates_for_query", return_value=[candidate]),
+                patch.object(dl, "YoutubeDL", FakeYoutubeDL),
+                patch.object(dl, "tag", return_value="metadata tagging failed: bad tags"),
+            ):
+                result = dl.download_track(
+                    dl.Track(name="Song", artists="Artist"),
+                    Path(tmp), None, 1,
+                    dl.RunOptions(overwrite="force", retries=0, lyrics=False), None, {},
+                )
+
+            self.assertTrue(result.ok)
+            self.assertEqual(result.path, str(original))
+            self.assertEqual(original.read_bytes(), b"replacement")
+            self.assertFalse(result.created_this_run)
+            self.assertIn("metadata tagging failed", result.detail)
+            self.assertEqual(result.warning, "metadata tagging failed: bad tags")
+
     def test_plain_search_is_tried_first_and_ytmusic_stays_a_fallback(self):
         track = dl.Track(name="Song - 2015 Remaster", artists="Artist, Guest")
         queries = dl.youtube_search_queries(track, limit=5)
@@ -396,7 +527,7 @@ class TieredSearchTests(unittest.TestCase):
             patch.object(dl, "youtube_candidates_for_query", side_effect=search_results) as search,
             patch.object(dl, "YoutubeDL", self._fake_youtube_dl(used_options, failures)),
             patch.object(dl, "apply_track_lyrics", return_value=None),
-            patch.object(dl, "tag"),
+            patch.object(dl, "tag", return_value=None),
             patch.object(dl.STOP_EVENT, "wait", return_value=False),
         ):
             result = dl.download_track(
@@ -462,6 +593,36 @@ class TieredSearchTests(unittest.TestCase):
 
 
 class FFmpegInstallTests(unittest.TestCase):
+    def test_installer_uses_homebrew_and_checks_the_result(self):
+        class FakeProcess:
+            stdout = io.StringIO("Installed ffmpeg\n")
+
+            def wait(self):
+                return 0
+
+        with (
+            patch.object(dl.sys, "platform", "darwin"),
+            patch.object(dl.shutil, "which", side_effect=lambda name: f"/opt/homebrew/bin/{name}"),
+            patch.object(dl.subprocess, "Popen", return_value=FakeProcess()) as install,
+            patch.object(dl.subprocess, "run", return_value=type("Result", (), {"returncode": 0})()) as check,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(dl.install_ffmpeg(), 0)
+
+        self.assertEqual(install.call_args.args[0], ["/opt/homebrew/bin/brew", "install", "ffmpeg"])
+        self.assertEqual(check.call_args.args[0], ["/opt/homebrew/bin/ffmpeg", "-version"])
+
+    def test_installer_refuses_unverified_download_when_homebrew_is_missing(self):
+        with (
+            patch.object(dl.sys, "platform", "darwin"),
+            patch.object(dl.shutil, "which", return_value=None),
+            patch.object(dl.req, "get") as download,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(dl.install_ffmpeg(), 1)
+        download.assert_not_called()
+
     def test_ffmpeg_install_command_exists(self):
         import argparse
 
@@ -475,6 +636,17 @@ class FFmpegInstallTests(unittest.TestCase):
 
 
 class SidecarAndRenameTests(unittest.TestCase):
+    def test_tagging_failure_is_returned_to_the_download_flow(self):
+        with (
+            patch.object(dl, "HAS_MUTAGEN", True),
+            patch.object(dl, "cover_bytes", return_value=None),
+            patch.object(dl, "write_mp3_tags", side_effect=ValueError("bad tags")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            warning = dl.tag(Path("Song.mp3"), dl.Track(name="Song", artists="Artist"), None)
+
+        self.assertIn("bad tags", warning)
+
     def setUp(self):
         with dl.LYRICS_CACHE_LOCK:
             dl.LYRICS_CACHE.clear()
@@ -510,6 +682,22 @@ class SidecarAndRenameTests(unittest.TestCase):
 
 
 class PreviewHealthHistoryTests(unittest.TestCase):
+    def test_large_playlist_preview_emits_only_json_on_stdout(self):
+        entity = {
+            "title": "Playlist",
+            "trackList": [{"title": "One", "artists": [{"name": "Artist"}], "uri": "spotify:track:id1"}],
+        }
+        output = io.StringIO()
+        with (
+            patch.object(dl, "fetch_embed_page", return_value=(entity, "token")),
+            patch.object(dl, "fetch_spclient_track_ids", return_value=["id1", "id2"]),
+            patch.object(dl, "fetch_track_by_id", return_value=dl.Track(name="Two", artists="Artist", spotify_id="id2")),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(dl.main(["preview", "--json", "https://open.spotify.com/playlist/abc"]), 0)
+
+        self.assertEqual(len(json.loads(output.getvalue())["items"][0]["tracks"]), 2)
+
     def test_preview_sources_returns_spotify_collection_payload(self):
         collection = dl.SpotifyCollection(
             name="Playlist",
@@ -556,7 +744,7 @@ class PreviewHealthHistoryTests(unittest.TestCase):
         url = "https://www.youtube.com/watch?v=video123"
         args = dl.parse_args(["download", "--json-events", "--output-dir", "/tmp/music", url])
         output = io.StringIO()
-        result = dl.DownloadResult(True, "Channel - Song", "Song.mp3", "/tmp/music/Song.mp3")
+        result = dl.DownloadResult(True, "Channel - Song", "Song.mp3", "/tmp/music/Song.mp3", created_this_run=True)
         with (
             patch.object(
                 dl,
@@ -576,9 +764,12 @@ class PreviewHealthHistoryTests(unittest.TestCase):
             if line.startswith("{")
         ]
         self.assertEqual(exit_code, 0)
-        self.assertEqual(events[-1]["event"], "track_progress")
-        self.assertEqual(events[-1]["state"], "succeeded")
-        self.assertEqual(events[-1]["path"], "/tmp/music/Song.mp3")
+        completed = next(event for event in events if event.get("state") == "succeeded")
+        self.assertEqual(completed["path"], "/tmp/music/Song.mp3")
+        self.assertTrue(completed["created_this_run"])
+        self.assertEqual(events[-1]["event"], "source_finished")
+        self.assertEqual(events[-1]["source_url"], url)
+        self.assertEqual(events[-1]["failed_count"], 0)
 
     def test_append_history_writes_jsonl_record(self):
         with tempfile.TemporaryDirectory() as tmp:

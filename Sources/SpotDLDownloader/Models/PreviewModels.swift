@@ -153,6 +153,7 @@ struct DownloadProgressItem: Identifiable, Equatable {
     var message: String
     var path: String?
     var skipped: Bool
+    var createdThisRun: Bool
 
     var displayTitle: String {
         title.isEmpty ? label : title
@@ -191,6 +192,7 @@ struct DownloadProgressSummary: Equatable {
 
 struct DownloadProgressEvent: Decodable {
     let event: String
+    let sourceURL: String?
     let key: String?
     let index: Int?
     let total: Int?
@@ -204,14 +206,17 @@ struct DownloadProgressEvent: Decodable {
     let message: String?
     let path: String?
     let skipped: Bool?
+    let createdThisRun: Bool?
     let trackCount: Int?
     let selectedCount: Int?
     let okCount: Int?
     let failedCount: Int?
+    let warningCount: Int?
     let outputFolder: String?
 
     enum CodingKeys: String, CodingKey {
         case event
+        case sourceURL = "source_url"
         case key
         case index
         case total
@@ -225,10 +230,12 @@ struct DownloadProgressEvent: Decodable {
         case message
         case path
         case skipped
+        case createdThisRun = "created_this_run"
         case trackCount = "track_count"
         case selectedCount = "selected_count"
         case okCount = "ok_count"
         case failedCount = "failed_count"
+        case warningCount = "warning_count"
         case outputFolder = "output_folder"
     }
 }

@@ -41,7 +41,7 @@ final class DownloadViewModel: ObservableObject {
     private var downloadStopAction = DownloadStopAction.none
     private var activeDownloadURLs = Set<String>()
     private var activeOutputFolder = ""
-    private var activeDownloadStartedAt: Date?
+    private var previewedQueries: [String] = []
     private var outputLineBuffer = ""
 
     var isDownloadRunning: Bool {
@@ -56,6 +56,7 @@ final class DownloadViewModel: ObservableObject {
 
     var canDownload: Bool {
         !status.isRunning
+            && !isPreviewing
             && !isAddingToAppleMusic
             && (queueItems.contains { $0.state != .failed } || parsedQueries.isEmpty == false)
     }
@@ -78,6 +79,14 @@ final class DownloadViewModel: ObservableObject {
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    static func selectedQueries(
+        editor: [String], previewed: [String], queue: [DownloadQueueItem], override: [String]?
+    ) -> [String] {
+        if let override { return override }
+        let runnable = queue.filter { $0.state != .failed }.map(\.url)
+        return editor != previewed || runnable.isEmpty ? editor : runnable
     }
 
     func checkDownloader() {
@@ -120,6 +129,7 @@ final class DownloadViewModel: ObservableObject {
         }
 
         isPreviewing = true
+        previewedQueries = queries
         errorMessage = nil
         queueItems = queries.map { DownloadQueueItem(url: $0) }
         selectedQueueItemID = queueItems.first?.id
@@ -132,6 +142,11 @@ final class DownloadViewModel: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.isPreviewing = false
+                guard self.parsedQueries == queries else {
+                    self.queueItems = self.parsedQueries.map { DownloadQueueItem(url: $0) }
+                    self.previewedQueries = []
+                    return
+                }
                 switch result {
                 case .success(let response):
                     self.queueItems = response.items.map { DownloadQueueItem(preview: $0) }
@@ -175,17 +190,20 @@ final class DownloadViewModel: ObservableObject {
         retries: Int,
         queriesOverride: [String]? = nil
     ) {
-        let runnableQueueURLs = queueItems.filter { $0.state != .failed }.map(\.url)
-        let queries = queriesOverride
-            ?? (runnableQueueURLs.isEmpty ? parsedQueries : runnableQueueURLs)
+        let editorChanged = parsedQueries != previewedQueries
+        let queries = Self.selectedQueries(
+            editor: parsedQueries, previewed: previewedQueries,
+            queue: queueItems, override: queriesOverride
+        )
         guard queries.isEmpty == false else {
             errorMessage = "Paste at least one Spotify or YouTube link."
             return
         }
 
-        if queueItems.isEmpty || Set(queueItems.map(\.url)) != Set(queries) {
+        if editorChanged || queueItems.map(\.url) != queries {
             queueItems = queries.map { DownloadQueueItem(url: $0) }
             selectedQueueItemID = queueItems.first?.id
+            previewedQueries = parsedQueries
         }
 
         FileManager.default.createDirectoryIfNeeded(atPath: outputFolder)
@@ -214,7 +232,6 @@ final class DownloadViewModel: ObservableObject {
         downloadStopAction = .none
         activeDownloadURLs = Set(queries)
         activeOutputFolder = URL(fileURLWithPath: outputFolder).standardizedFileURL.path
-        activeDownloadStartedAt = Date()
         outputLineBuffer = ""
         errorMessage = nil
         appleMusicMessage = nil
@@ -263,22 +280,21 @@ final class DownloadViewModel: ObservableObject {
                         case .none:
                             if code == 0 {
                                 self.status = .succeeded
-                                self.updateQueueItems(for: self.activeDownloadURLs, state: .succeeded, message: "Complete")
+                                self.finishRunningQueueItems(as: .succeeded, message: "Complete")
                                 self.recalculateProgressSummary()
-                                self.loadHistory()
                             } else {
                                 self.status = .failed(code: code)
                                 self.errorMessage = "The downloader exited with code \(code)."
-                                self.updateQueueItems(for: self.activeDownloadURLs, state: .failed, message: "Exit \(code)")
+                                self.finishRunningQueueItems(as: .failed, message: "Exit \(code)")
                                 self.finishRunningProgressItems(as: .failed, message: "Exit \(code)")
                             }
                         }
+                        self.loadHistory()
                         if self.downloadStopAction == .none, addToAppleMusic, mediaKind == .audio {
                             self.addCompletedFilesToAppleMusic(playlistBaseName: appleMusicPlaylistName)
                         }
                         self.activeDownloadURLs.removeAll()
                         self.activeOutputFolder = ""
-                        self.activeDownloadStartedAt = nil
                         self.downloadStopAction = .none
                     }
                 }
@@ -522,14 +538,10 @@ final class DownloadViewModel: ObservableObject {
             let standardizedPath = fileURL.path
             var isDirectory = ObjCBool(false)
             let exists = FileManager.default.fileExists(atPath: standardizedPath, isDirectory: &isDirectory)
-            let modifiedAt = (try? FileManager.default.attributesOfItem(atPath: standardizedPath)[.modificationDate]) as? Date
-            let wasCreatedThisRun = activeDownloadStartedAt.map { startedAt in
-                modifiedAt.map { $0 >= startedAt.addingTimeInterval(-1) } ?? false
-            } ?? false
             guard standardizedPath.hasPrefix(rootPrefix),
                   allowedExtensions.contains(fileURL.pathExtension.lowercased()),
                   (!exists || !isDirectory.boolValue),
-                  (!exists || wasCreatedThisRun) else {
+                  progressItems[index].createdThisRun else {
                 failed += 1
                 appendLog("Kept completed file because it was not verified as a new file from this run: \(standardizedPath)\n")
                 continue
@@ -575,7 +587,7 @@ final class DownloadViewModel: ObservableObject {
     func installFFmpeg() {
         guard !isInstallingFFmpeg else { return }
         isInstallingFFmpeg = true
-        ffmpegInstallStatus = "Downloading ffmpeg…"
+        ffmpegInstallStatus = "Installing ffmpeg with Homebrew…"
 
         do {
             try service.installFFmpeg(
@@ -724,6 +736,15 @@ final class DownloadViewModel: ObservableObject {
             recalculateProgressSummary()
         case "track_progress":
             upsertProgressItem(from: event)
+        case "source_finished":
+            if let url = event.sourceURL {
+                let failed = event.failedCount ?? 0
+                let warnings = event.warningCount ?? 0
+                let message = failed > 0
+                    ? "\(failed) failed, \(event.okCount ?? 0) completed"
+                    : (warnings > 0 ? "Completed with \(warnings) metadata warning\(warnings == 1 ? "" : "s")" : "Complete")
+                updateQueueItems(for: [url], state: failed > 0 ? .failed : .succeeded, message: message)
+            }
         default:
             break
         }
@@ -749,6 +770,7 @@ final class DownloadViewModel: ObservableObject {
             item.message = event.message ?? item.message
             item.path = event.path ?? item.path
             item.skipped = event.skipped ?? item.skipped
+            item.createdThisRun = event.createdThisRun ?? item.createdThisRun
             progressItems[existingIndex] = item
         } else {
             progressItems.append(
@@ -765,7 +787,8 @@ final class DownloadViewModel: ObservableObject {
                     state: state,
                     message: event.message ?? state.label,
                     path: event.path,
-                    skipped: event.skipped ?? false
+                    skipped: event.skipped ?? false,
+                    createdThisRun: event.createdThisRun ?? false
                 )
             )
         }
@@ -822,6 +845,17 @@ final class DownloadViewModel: ObservableObject {
         queueItems = queueItems.map { item in
             var copy = item
             if urls.contains(copy.url) {
+                copy.state = state
+                copy.message = message
+            }
+            return copy
+        }
+    }
+
+    private func finishRunningQueueItems(as state: QueueItemState, message: String) {
+        queueItems = queueItems.map { item in
+            var copy = item
+            if activeDownloadURLs.contains(copy.url) && copy.state == .running {
                 copy.state = state
                 copy.message = message
             }

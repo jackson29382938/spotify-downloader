@@ -14,7 +14,7 @@ The script exposes several subcommands consumed by the native macOS app:
     health          Emit a JSON diagnostics report.
     library         Scan/repair an existing music library's metadata.
     embed-lrc       Move .lrc sidecar lyrics into the audio files themselves.
-    ffmpeg-install  Download a static ffmpeg build into Application Support.
+    ffmpeg-install  Install ffmpeg with Homebrew on macOS.
 """
 
 from __future__ import annotations
@@ -34,9 +34,8 @@ import subprocess
 import sys
 import threading
 import time
-import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from logging.handlers import RotatingFileHandler
@@ -91,7 +90,6 @@ LYRICS_SEARCH_API = "https://lrclib.net/api/search"
 LYRICS_STYLES = ("plain", "synced")
 ITUNES_API = "https://itunes.apple.com/search"
 MUSICBRAINZ_API = "https://musicbrainz.org/ws/2/recording"
-EVERMEET_FFMPEG = "https://evermeet.cx/ffmpeg/getrelease/zip"
 USER_AGENT = "Mozilla/5.0"
 
 RUNNING_PROCESSES: set[subprocess.Popen[str]] = set()
@@ -211,6 +209,8 @@ class DownloadResult:
     detail: str = ""
     path: str | None = None
     skipped: bool = False
+    created_this_run: bool = False
+    warning: str | None = None
 
 
 @dataclass
@@ -637,52 +637,31 @@ def fetch_track_by_id(spotify_id: str) -> Track:
     return track_from_entity(entity, album=fetch_track_album(spotify_id), spotify_id=spotify_id)
 
 
-def manifest_spotify_ids(output_dir: Path) -> set[str]:
-    manifest = output_dir / MANIFEST_FILENAME
-    ids: set[str] = set()
-    if not manifest.exists():
-        return ids
-    try:
-        for line in manifest.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            item = json.loads(line)
-            key = item.get("key")
-            file_name = item.get("file", "")
-            if not isinstance(key, str) or not key.startswith("spotify:"):
-                continue
-            if (output_dir / str(file_name)).exists():
-                ids.add(key.split(":", 1)[1])
-    except Exception as exc:
-        LOG.warning("manifest id scan failed for %s: %s", manifest, exc)
-    return ids
-
-
 def complete_playlist_tracks(
     playlist_id: str,
     token: str,
     embed_tracks: list[Track],
-    skip_ids: set[str] | None = None,
+    cached_tracks: dict[tuple[str, int], Track] | None = None,
 ) -> list[Track]:
-    skip_ids = skip_ids or set()
+    cached_tracks = cached_tracks or {}
     try:
         ordered_ids = fetch_spclient_track_ids(playlist_id, token)
     except Exception as exc:
         LOG.info("full playlist lookup failed for %s: %s", playlist_id, exc)
         return embed_tracks
 
-    if len(ordered_ids) <= len(embed_tracks) and not skip_ids:
+    if len(ordered_ids) <= len(embed_tracks) and not cached_tracks:
         return embed_tracks
 
     tracks_by_id = {track.spotify_id: track for track in embed_tracks if track.spotify_id}
-    missing_ids = [
-        spotify_id
-        for spotify_id in ordered_ids
-        if spotify_id not in tracks_by_id and spotify_id not in skip_ids
-    ]
+    missing_ids = list(dict.fromkeys(
+        spotify_id for index, spotify_id in enumerate(ordered_ids, 1)
+        if spotify_id not in tracks_by_id and (spotify_id, index) not in cached_tracks
+    ))
     if missing_ids:
         print(
             f"Spotify playlist has {len(ordered_ids)} tracks; fetching {len(missing_ids)} more.",
+            file=sys.stderr,
             flush=True,
         )
 
@@ -700,11 +679,17 @@ def complete_playlist_tracks(
                     spotify_id=spotify_id,
                 )
 
-    ordered_tracks = [tracks_by_id[spotify_id] for spotify_id in ordered_ids if spotify_id in tracks_by_id]
+    ordered_tracks = [
+        cached_tracks.get((spotify_id, index)) or tracks_by_id.get(spotify_id)
+        for index, spotify_id in enumerate(ordered_ids, 1)
+    ]
+    ordered_tracks = [track for track in ordered_tracks if track is not None]
     return ordered_tracks or embed_tracks
 
 
-def fetch_spotify(url: str) -> SpotifyCollection:
+def fetch_spotify(
+    url: str, resume_output_root: str | None = None, resume_format: str | None = None
+) -> SpotifyCollection:
     kind, spotify_id = parse_spotify_url(url)
     entity, token = fetch_embed_page(kind, spotify_id)
     name = entity.get("title") or entity.get("name") or kind.title()
@@ -743,7 +728,10 @@ def fetch_spotify(url: str) -> SpotifyCollection:
         raise ValueError(f"No playable tracks found in Spotify {kind}: {name}")
 
     if kind == "playlist" and token:
-        tracks = complete_playlist_tracks(spotify_id, token, tracks)
+        cached = {}
+        if resume_output_root and resume_format:
+            cached = load_manifest_tracks(Path(resume_output_root).expanduser() / safe(name), resume_format)
+        tracks = complete_playlist_tracks(spotify_id, token, tracks, cached_tracks=cached)
 
     return SpotifyCollection(
         name=name,
@@ -1069,9 +1057,9 @@ def tag(
     artwork_max_size: int | None = None,
     artwork_jpeg: bool = False,
     lyrics_style: str = "plain",
-) -> None:
+) -> str | None:
     if not HAS_MUTAGEN:
-        return
+        return "metadata tagging unavailable: mutagen is not installed"
 
     try:
         suffix = path.suffix.lower()
@@ -1090,6 +1078,8 @@ def tag(
     except Exception as exc:
         LOG.warning("tagging failed for %s: %s", path, exc)
         print(f"  Warning: tagging failed for {path.name}: {exc}", flush=True)
+        return f"metadata tagging failed: {exc}"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1258,33 +1248,71 @@ def existing_output(output_dir: Path, stem: str, fmt: str) -> Path | None:
 
 def track_key(track: Track, pos: int | None) -> str:
     if track.spotify_id:
-        return f"spotify:{track.spotify_id}"
+        return f"spotify:{track.spotify_id}:{pos}" if pos is not None else f"spotify:{track.spotify_id}"
     duration = track.duration_ms or 0
     return f"{pos or 0}:{track.artists.casefold()}:{track.name.casefold()}:{duration}"
 
 
-def load_manifest(output_dir: Path) -> dict[str, Path]:
+def read_manifest_entries(output_dir: Path) -> list[dict]:
     manifest = output_dir / MANIFEST_FILENAME
-    completed: dict[str, Path] = {}
+    entries: list[dict] = []
     if not manifest.exists():
-        return completed
-
+        return entries
     try:
-        for line in manifest.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            item = json.loads(line)
-            key = item.get("key")
-            path = output_dir / str(item.get("file", ""))
-            if key and path.exists():
-                completed[str(key)] = path
-    except Exception as exc:
+        with manifest.open(encoding="utf-8") as handle:
+            for number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                    if isinstance(item, dict):
+                        entries.append(item)
+                except json.JSONDecodeError as exc:
+                    LOG.warning("manifest line %s invalid in %s: %s", number, manifest, exc)
+    except OSError as exc:
         LOG.warning("manifest read failed for %s: %s", manifest, exc)
+    return entries
+
+
+def load_manifest(output_dir: Path) -> dict[str, Path]:
+    completed: dict[str, Path] = {}
+    for item in read_manifest_entries(output_dir):
+        key = item.get("key")
+        file_name = item.get("file")
+        if not isinstance(key, str) or not isinstance(file_name, str):
+            continue
+        path = output_dir / file_name
+        if path.is_file():
+            completed[key] = path
     return completed
 
 
-def append_manifest(output_dir: Path, key: str, path: Path) -> None:
+def load_manifest_tracks(output_dir: Path, fmt: str) -> dict[tuple[str, int], Track]:
+    tracks: dict[tuple[str, int], Track] = {}
+    for item in read_manifest_entries(output_dir):
+        key = item.get("key")
+        file_name = item.get("file")
+        metadata = item.get("track")
+        if not isinstance(key, str) or not isinstance(file_name, str) or not isinstance(metadata, dict):
+            continue
+        match = re.fullmatch(r"spotify:([A-Za-z0-9]+):(\d+)", key)
+        if not match or not (output_dir / file_name).is_file() or Path(file_name).suffix.lower() != f".{fmt}":
+            continue
+        name, artists = metadata.get("name"), metadata.get("artists")
+        if not isinstance(name, str) or not isinstance(artists, str):
+            continue
+        tracks[(match.group(1), int(match.group(2)))] = Track(
+            name=name, artists=artists, spotify_id=match.group(1),
+            duration_ms=metadata.get("duration_ms"),
+            cover_url=metadata.get("cover_url"), album=metadata.get("album"),
+        )
+    return tracks
+
+
+def append_manifest(output_dir: Path, key: str, path: Path, track: Track | None = None) -> None:
     entry = {"key": key, "file": path.name}
+    if track is not None:
+        entry["track"] = asdict(track)
     with MANIFEST_LOCK:
         with (output_dir / MANIFEST_FILENAME).open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -1669,15 +1697,6 @@ def choose_youtube_candidate(
             else:
                 return exact_pool[0], "title matched, artist unavailable"
 
-    title_pool = [candidate for candidate in candidates if title_ok(candidate)]
-    if title_pool and expected_duration and artist_available:
-        timed = [candidate for candidate in title_pool if candidate.get("duration")]
-        if timed:
-            chosen = min(timed, key=lambda item: abs(float(item["duration"]) - expected_duration))
-            diff = abs(float(chosen["duration"]) - expected_duration)
-            if diff <= 30:
-                return chosen, "title and duration matched"
-
     if allow_closest and expected_duration:
         timed = [candidate for candidate in candidates if candidate.get("duration")]
         if timed:
@@ -1819,6 +1838,7 @@ def download_youtube_media(url: str, options: RunOptions) -> DownloadResult:
 
     output_dir = Path(options_output_dir.get()).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
+    preexisting_paths = set(output_dir.iterdir())
     ffmpeg_location = options.ffmpeg_location or find_ffmpeg_location()
 
     media_label = "video" if options.media == "video" else "audio"
@@ -1874,6 +1894,7 @@ def download_youtube_media(url: str, options: RunOptions) -> DownloadResult:
                     youtube_label(info),
                     detail,
                     str(path) if path else None,
+                    created_this_run=path is not None and path not in preexisting_paths,
                 )
         except Exception as exc:
             error_detail = str(exc).strip()[:700]
@@ -1958,7 +1979,7 @@ def download_track(
     ffmpeg_location = options.ffmpeg_location
     key = track_key(track, pos)
     label = f"{track.artists} - {track.name}"
-    if key in manifest_done and options.overwrite == "skip":
+    if key in manifest_done and manifest_done[key].suffix.lower() == f".{options.fmt}" and options.overwrite == "skip":
         return DownloadResult(True, label, f"resume skip: {manifest_done[key].name}", str(manifest_done[key]), True)
 
     width = max(2, len(str(total)))
@@ -1967,17 +1988,15 @@ def download_track(
 
     existing = existing_output(output_dir, stem, options.fmt)
     if existing and options.overwrite == "skip":
-        append_manifest(output_dir, key, existing)
+        append_manifest(output_dir, key, existing, track)
         return DownloadResult(True, label, f"skip exists: {existing.name}", str(existing), True)
     if existing and options.overwrite == "metadata":
         working = enriched_track(track, fallback_cover_url)
         lyrics = apply_track_lyrics(existing, working, options)
-        tag(existing, working, pos, lyrics, options.artwork_max_size, options.artwork_jpeg, options.lyrics_style)
-        append_manifest(output_dir, key, existing)
-        return DownloadResult(True, label, f"metadata refreshed: {existing.name}", str(existing), True)
-    if existing and options.overwrite == "force":
-        existing.unlink(missing_ok=True)
-
+        warning = tag(existing, working, pos, lyrics, options.artwork_max_size, options.artwork_jpeg, options.lyrics_style)
+        append_manifest(output_dir, key, existing, working)
+        detail = f"metadata refreshed: {existing.name}" if not warning else f"audio kept; {warning}"
+        return DownloadResult(True, label, detail, str(existing), True, warning=warning)
     working_track = enriched_track(track, fallback_cover_url)
     total_attempts = max(1, options.retries + 1)
     reserved_stem: str | None = None
@@ -2059,11 +2078,22 @@ def download_track(
                 continue
 
             lyrics = apply_track_lyrics(final, working_track, options)
-            tag(final, working_track, pos, lyrics, options.artwork_max_size, options.artwork_jpeg, options.lyrics_style)
-            append_manifest(output_dir, key, final)
+            warning = tag(final, working_track, pos, lyrics, options.artwork_max_size, options.artwork_jpeg, options.lyrics_style)
+            if existing and options.overwrite == "force":
+                replacement_lrc = final.with_suffix(".lrc")
+                original_lrc = existing.with_suffix(".lrc")
+                final.replace(existing)
+                if replacement_lrc.exists():
+                    replacement_lrc.replace(original_lrc)
+                else:
+                    original_lrc.unlink(missing_ok=True)
+                final = existing
+            append_manifest(output_dir, key, final, working_track)
             detail = final.name if attempt == 0 else f"{final.name} via {method}"
+            if warning:
+                detail += f"; {warning}"
             release_output_stem(output_dir, reserved_stem, options.fmt)
-            return DownloadResult(True, label, detail, str(final))
+            return DownloadResult(True, label, detail, str(final), created_this_run=existing is None, warning=warning)
         except Exception as exc:
             error_detail = str(exc).strip()[:700]
             LOG.warning("%s download failed for %s: %s", method, label, error_detail[:300])
@@ -2100,6 +2130,7 @@ def track_progress_event(
     path: str | None = None,
     skipped: bool = False,
     cover_url: str | None = None,
+    created_this_run: bool = False,
 ) -> None:
     emit_json_event(
         options.json_events,
@@ -2117,6 +2148,7 @@ def track_progress_event(
         message=message,
         path=path,
         skipped=skipped,
+        created_this_run=created_this_run,
     )
 
 
@@ -2126,7 +2158,7 @@ def download_collection(
     output_root: str,
     threads: int,
     start: int,
-) -> tuple[int, int, list[str], Path]:
+) -> tuple[int, int, int, list[str], Path]:
     output_dir = Path(output_root).expanduser()
     if collection.use_subfolder:
         output_dir = output_dir / safe(collection.name)
@@ -2138,12 +2170,13 @@ def download_collection(
         if index >= start
     ]
     if not selected_tracks:
-        return 0, 0, [], output_dir
+        return 0, 0, 0, [], output_dir
 
     options.ffmpeg_location = options.ffmpeg_location or find_ffmpeg_location()
     manifest_done = load_manifest(output_dir)
     print(f"Downloading to: {output_dir}", flush=True)
-    print(f"Using {max(1, threads)} worker(s)", flush=True)
+    workers = min(16, max(1, threads))
+    print(f"Using {workers} worker(s)", flush=True)
     if manifest_done and options.overwrite == "skip":
         print(f"Resume manifest: {len(manifest_done)} completed track(s)", flush=True)
 
@@ -2158,6 +2191,7 @@ def download_collection(
     )
 
     ok = 0
+    warnings = 0
     failed: list[str] = []
 
     def run_one(index: int, track: Track) -> tuple[int, Track, DownloadResult]:
@@ -2175,33 +2209,53 @@ def download_collection(
         return index, track, result
 
     def handle_result(index: int, track: Track, result: DownloadResult) -> None:
-        nonlocal ok
+        nonlocal ok, warnings
         pos = index if collection.use_subfolder else None
         if result.ok:
             ok += 1
+            warnings += bool(result.warning)
             state = "skipped" if result.skipped else "succeeded"
-            track_progress_event(options, track, pos, len(collection.tracks), state, 1.0, result.detail, result.path, result.skipped)
+            track_progress_event(
+                options, track, pos, len(collection.tracks), state, 1.0,
+                result.detail, result.path, result.skipped,
+                created_this_run=result.created_this_run,
+            )
             print(f"  [{index}/{len(collection.tracks)}] Done: {result.label} ({result.detail})", flush=True)
         else:
             failed.append(f"{index}. {result.label}: {result.detail}")
             track_progress_event(options, track, pos, len(collection.tracks), "failed", 1.0, result.detail)
             print(f"  [{index}/{len(collection.tracks)}] Failed: {result.label}: {result.detail}", flush=True)
 
-    if threads <= 1:
+    if workers == 1:
         for index, track in selected_tracks:
             print(f"  [{index}/{len(collection.tracks)}] {track.artists} - {track.name}", flush=True)
             _, _, result = run_one(index, track)
             handle_result(index, track, result)
     else:
-        with ThreadPoolExecutor(max_workers=max(1, threads)) as executor:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            selected = iter(selected_tracks)
             futures = {}
-            for index, track in selected_tracks:
+
+            def queue_next() -> bool:
+                try:
+                    index, track = next(selected)
+                except StopIteration:
+                    return False
                 print(f"  [{index}/{len(collection.tracks)}] queued {track.artists} - {track.name}", flush=True)
                 track_progress_event(options, track, index if collection.use_subfolder else None, len(collection.tracks), "queued", 0.0, "Queued")
                 futures[executor.submit(run_one, index, track)] = (index, track)
-            for future in as_completed(futures):
-                index, track, result = future.result()
-                handle_result(index, track, result)
+                return True
+
+            for _ in range(workers * 2):
+                if not queue_next():
+                    break
+            while futures:
+                finished, _ = wait(futures, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    futures.pop(future)
+                    index, track, result = future.result()
+                    handle_result(index, track, result)
+                    queue_next()
 
     fail_count = len(failed)
     print(f"Downloaded: {ok}/{len(selected_tracks)}", flush=True)
@@ -2216,10 +2270,11 @@ def download_collection(
         title=collection.name,
         ok_count=ok,
         failed_count=fail_count,
+        warning_count=warnings,
         output_folder=str(output_dir),
     )
 
-    return ok, fail_count, failed, output_dir
+    return ok, fail_count, warnings, failed, output_dir
 
 
 # ---------------------------------------------------------------------------
@@ -2550,6 +2605,8 @@ def score_library_candidate(guess: LibraryTrackGuess, candidate: LibraryMetadata
     else:
         duration_score = 0.6
     if not guess.artist:
+        if not guess.duration_ms or not candidate.duration_ms:
+            return 0.0
         return title_score * 0.8 + duration_score * 0.2
     return title_score * 0.5 + artist_score * 0.35 + duration_score * 0.15
 
@@ -2838,36 +2895,41 @@ def install_ffmpeg(json_events: bool = False) -> int:
         print("Automatic ffmpeg install is only supported on macOS.", file=sys.stderr, flush=True)
         return 1
 
-    target_dir = app_support_dir() / "bin"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / "ffmpeg"
-
-    emit_json_event(json_events, "ffmpeg_install", state="running", progress=0.0, message="Downloading ffmpeg")
-    print("Downloading static ffmpeg build...", flush=True)
-    try:
-        response = req.get(EVERMEET_FFMPEG, headers={"User-Agent": USER_AGENT}, timeout=120)
-        response.raise_for_status()
-    except Exception as exc:
-        emit_json_event(json_events, "ffmpeg_install", state="failed", progress=1.0, message=str(exc))
-        print(f"ffmpeg download failed: {exc}", file=sys.stderr, flush=True)
+    brew = shutil.which("brew")
+    if not brew:
+        message = "Homebrew is required for automatic ffmpeg installation. Install ffmpeg manually and run diagnostics again."
+        emit_json_event(json_events, "ffmpeg_install", state="failed", progress=1.0, message=message)
+        print(message, file=sys.stderr, flush=True)
         return 1
 
-    emit_json_event(json_events, "ffmpeg_install", state="running", progress=0.6, message="Extracting")
+    emit_json_event(json_events, "ffmpeg_install", state="running", progress=0.0, message="Installing ffmpeg with Homebrew")
+    print("Installing ffmpeg with Homebrew...", flush=True)
     try:
-        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
-            member = next((name for name in archive.namelist() if name.rstrip("/").endswith("ffmpeg")), None)
-            if member is None:
-                raise ValueError("ffmpeg binary not found in archive")
-            with archive.open(member) as source, target.open("wb") as dest:
-                shutil.copyfileobj(source, dest)
-        target.chmod(0o755)
+        process = subprocess.Popen(
+            [brew, "install", "ffmpeg"], stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, bufsize=1,
+        )
+        register_process(process)
+        try:
+            if process.stdout is not None:
+                for line in process.stdout:
+                    print(line.rstrip(), flush=True)
+            installed = process.wait() == 0
+        finally:
+            unregister_process(process)
     except Exception as exc:
         emit_json_event(json_events, "ffmpeg_install", state="failed", progress=1.0, message=str(exc))
-        print(f"ffmpeg extraction failed: {exc}", file=sys.stderr, flush=True)
+        print(f"ffmpeg install failed: {exc}", file=sys.stderr, flush=True)
+        return 1
+
+    target = shutil.which("ffmpeg") or find_ffmpeg_location()
+    if not installed or not target:
+        emit_json_event(json_events, "ffmpeg_install", state="failed", progress=1.0, message="Homebrew could not install ffmpeg")
+        print("Homebrew could not install ffmpeg.", file=sys.stderr, flush=True)
         return 1
 
     try:
-        result = subprocess.run([str(target), "-version"], capture_output=True, text=True, timeout=30)
+        result = subprocess.run([target, "-version"], capture_output=True, text=True, timeout=30)
         verified = result.returncode == 0
     except Exception as exc:
         verified = False
@@ -2945,7 +3007,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("doctor", help="Check yt-dlp and ffmpeg dependencies.")
 
-    ffmpeg_install = subparsers.add_parser("ffmpeg-install", help="Download a static ffmpeg build (macOS).")
+    ffmpeg_install = subparsers.add_parser("ffmpeg-install", help="Install ffmpeg with Homebrew (macOS).")
     ffmpeg_install.add_argument("--json-events", dest="json_events", action="store_true", help="Emit JSON progress events.")
 
     download = subparsers.add_parser("download", help="Download Spotify or YouTube URLs.")
@@ -2954,7 +3016,7 @@ def create_parser() -> argparse.ArgumentParser:
     download.add_argument("--media", choices=("audio", "video"), default="audio", help="Download audio, or full videos for YouTube URLs.")
     download.add_argument("-f", "--format", default="mp3", dest="fmt", choices=("mp3", "m4a", "flac", "opus", "ogg", "wav"), help="Audio output format.")
     download.add_argument("-b", "--bitrate", default="192k", help="Audio quality, e.g. 192k, 320k, 0.")
-    download.add_argument("--threads", type=int, default=4, help="Parallel downloads per playlist.")
+    download.add_argument("--threads", type=int, choices=range(1, 17), default=4, help="Parallel downloads per playlist (1-16).")
     download.add_argument("--retries", type=int, choices=range(0, 6), default=2, help="Additional attempts per failed track (0-5), using different search and download methods.")
     download.add_argument("--overwrite", choices=("skip", "metadata", "force"), default="skip", help="How to handle existing files.")
     download.add_argument("--track-number-prefix", dest="track_number_prefix", action="store_true", default=True, help="Prefix files with their track number.")
@@ -3017,27 +3079,40 @@ def run_download(args: argparse.Namespace) -> int:
     options_output_dir.set(str(Path(args.output_dir).expanduser()))
 
     total_failures = 0
+    def finish_source(url: str, ok: int, failed: int, warnings: int = 0) -> None:
+        emit_json_event(
+            options.json_events, "source_finished", source_url=url,
+            ok_count=ok, failed_count=failed, warning_count=warnings,
+        )
+
     for url_index, url in enumerate(args.urls, 1):
         if is_spotify_url(url):
             if args.media == "video":
                 print("Spotify links can only be downloaded as audio.", file=sys.stderr, flush=True)
                 total_failures += 1
+                finish_source(url, 0, 1)
                 continue
 
             print(f"Fetching Spotify metadata: {url}", flush=True)
             try:
-                collection = fetch_spotify(url)
+                collection = fetch_spotify(
+                    url,
+                    resume_output_root=args.output_dir if options.overwrite == "skip" else None,
+                    resume_format=options.fmt if options.overwrite == "skip" else None,
+                )
             except Exception as exc:
                 print(f"Failed to fetch Spotify metadata: {exc}", file=sys.stderr, flush=True)
                 total_failures += 1
+                finish_source(url, 0, 1)
                 continue
 
             print_track_list(collection)
             if args.dry_run:
+                finish_source(url, len(collection.tracks), 0)
                 continue
 
             try:
-                ok, failures, failed, output_dir = download_collection(
+                ok, failures, warnings, failed, output_dir = download_collection(
                     collection, options, args.output_dir, args.threads, args.start
                 )
             except KeyboardInterrupt:
@@ -3053,9 +3128,11 @@ def run_download(args: argparse.Namespace) -> int:
                     "output_folder": str(output_dir),
                     "ok_count": ok,
                     "failed_count": failures,
+                    "warning_count": warnings,
                     "failed": failed,
                 }
             )
+            finish_source(url, ok, failures, warnings)
             continue
 
         if is_youtube_url(url):
@@ -3065,10 +3142,12 @@ def run_download(args: argparse.Namespace) -> int:
             except Exception as exc:
                 print(f"Failed to fetch YouTube metadata: {exc}", file=sys.stderr, flush=True)
                 total_failures += 1
+                finish_source(url, 0, 1)
                 continue
 
             print_youtube_info(youtube_info, args.media)
             if args.dry_run:
+                finish_source(url, 1, 0)
                 continue
 
             youtube_title_text = str(youtube_info.get("title") or "YouTube audio")
@@ -3108,6 +3187,7 @@ def run_download(args: argparse.Namespace) -> int:
                     state="succeeded",
                     message=result.detail,
                     path=result.path,
+                    created_this_run=result.created_this_run,
                 )
             else:
                 total_failures += 1
@@ -3137,11 +3217,13 @@ def run_download(args: argparse.Namespace) -> int:
                     "failed": [] if result.ok else [result.detail],
                 }
             )
+            finish_source(url, 1 if result.ok else 0, 0 if result.ok else 1)
             continue
 
         expected = "Spotify or YouTube URL" if args.media == "audio" else "YouTube URL"
         print(f"Unsupported URL, expected a {expected}: {url}", file=sys.stderr, flush=True)
         total_failures += 1
+        finish_source(url, 0, 1)
 
     return 1 if total_failures else 0
 
