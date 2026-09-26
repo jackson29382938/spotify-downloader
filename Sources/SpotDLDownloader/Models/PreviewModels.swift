@@ -153,6 +153,7 @@ struct DownloadProgressItem: Identifiable, Equatable {
     var message: String
     var path: String?
     var skipped: Bool
+    var createdThisRun: Bool
 
     var displayTitle: String {
         title.isEmpty ? label : title
@@ -204,6 +205,7 @@ struct DownloadProgressEvent: Decodable {
     let message: String?
     let path: String?
     let skipped: Bool?
+    let createdThisRun: Bool?
     let trackCount: Int?
     let selectedCount: Int?
     let okCount: Int?
@@ -225,6 +227,7 @@ struct DownloadProgressEvent: Decodable {
         case message
         case path
         case skipped
+        case createdThisRun = "created_this_run"
         case trackCount = "track_count"
         case selectedCount = "selected_count"
         case okCount = "ok_count"

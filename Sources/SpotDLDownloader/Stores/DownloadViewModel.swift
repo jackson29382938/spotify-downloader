@@ -34,7 +34,6 @@ final class DownloadViewModel: ObservableObject {
     private var downloadStopAction = DownloadStopAction.none
     private var activeDownloadURLs = Set<String>()
     private var activeOutputFolder = ""
-    private var activeDownloadStartedAt: Date?
     private var outputLineBuffer = ""
 
     var isDownloadRunning: Bool {
@@ -205,7 +204,6 @@ final class DownloadViewModel: ObservableObject {
         downloadStopAction = .none
         activeDownloadURLs = Set(queries)
         activeOutputFolder = URL(fileURLWithPath: outputFolder).standardizedFileURL.path
-        activeDownloadStartedAt = Date()
         outputLineBuffer = ""
         errorMessage = nil
         appleMusicMessage = nil
@@ -268,7 +266,6 @@ final class DownloadViewModel: ObservableObject {
                         }
                         self.activeDownloadURLs.removeAll()
                         self.activeOutputFolder = ""
-                        self.activeDownloadStartedAt = nil
                         self.downloadStopAction = .none
                     }
                 }
@@ -451,14 +448,10 @@ final class DownloadViewModel: ObservableObject {
             let standardizedPath = fileURL.path
             var isDirectory = ObjCBool(false)
             let exists = FileManager.default.fileExists(atPath: standardizedPath, isDirectory: &isDirectory)
-            let modifiedAt = (try? FileManager.default.attributesOfItem(atPath: standardizedPath)[.modificationDate]) as? Date
-            let wasCreatedThisRun = activeDownloadStartedAt.map { startedAt in
-                modifiedAt.map { $0 >= startedAt.addingTimeInterval(-1) } ?? false
-            } ?? false
             guard standardizedPath.hasPrefix(rootPrefix),
                   allowedExtensions.contains(fileURL.pathExtension.lowercased()),
                   (!exists || !isDirectory.boolValue),
-                  (!exists || wasCreatedThisRun) else {
+                  progressItems[index].createdThisRun else {
                 failed += 1
                 appendLog("Kept completed file because it was not verified as a new file from this run: \(standardizedPath)\n")
                 continue
@@ -678,6 +671,7 @@ final class DownloadViewModel: ObservableObject {
             item.message = event.message ?? item.message
             item.path = event.path ?? item.path
             item.skipped = event.skipped ?? item.skipped
+            item.createdThisRun = event.createdThisRun ?? item.createdThisRun
             progressItems[existingIndex] = item
         } else {
             progressItems.append(
@@ -694,7 +688,8 @@ final class DownloadViewModel: ObservableObject {
                     state: state,
                     message: event.message ?? state.label,
                     path: event.path,
-                    skipped: event.skipped ?? false
+                    skipped: event.skipped ?? false,
+                    createdThisRun: event.createdThisRun ?? false
                 )
             )
         }

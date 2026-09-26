@@ -1523,6 +1523,7 @@ def download_youtube_media(url: str, options: RunOptions) -> DownloadResult:
 
     output_dir = Path(options_output_dir.get()).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
+    preexisting_paths = set(output_dir.iterdir())
     ffmpeg_location = options.ffmpeg_location or find_ffmpeg_location()
 
     media_label = "video" if options.media == "video" else "audio"
@@ -1578,6 +1579,7 @@ def download_youtube_media(url: str, options: RunOptions) -> DownloadResult:
                     youtube_label(info),
                     detail,
                     str(path) if path else None,
+                    created_this_run=path is not None and path not in preexisting_paths,
                 )
         except Exception as exc:
             error_detail = str(exc).strip()[:700]
@@ -1806,6 +1808,7 @@ def track_progress_event(
     path: str | None = None,
     skipped: bool = False,
     cover_url: str | None = None,
+    created_this_run: bool = False,
 ) -> None:
     emit_json_event(
         options.json_events,
@@ -1823,6 +1826,7 @@ def track_progress_event(
         message=message,
         path=path,
         skipped=skipped,
+        created_this_run=created_this_run,
     )
 
 
@@ -1886,7 +1890,11 @@ def download_collection(
         if result.ok:
             ok += 1
             state = "skipped" if result.skipped else "succeeded"
-            track_progress_event(options, track, pos, len(collection.tracks), state, 1.0, result.detail, result.path, result.skipped)
+            track_progress_event(
+                options, track, pos, len(collection.tracks), state, 1.0,
+                result.detail, result.path, result.skipped,
+                created_this_run=result.created_this_run,
+            )
             print(f"  [{index}/{len(collection.tracks)}] Done: {result.label} ({result.detail})", flush=True)
         else:
             failed.append(f"{index}. {result.label}: {result.detail}")
@@ -2721,6 +2729,7 @@ def run_download(args: argparse.Namespace) -> int:
                     state="succeeded",
                     message=result.detail,
                     path=result.path,
+                    created_this_run=result.created_this_run,
                 )
             else:
                 total_failures += 1

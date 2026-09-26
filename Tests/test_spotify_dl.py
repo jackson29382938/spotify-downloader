@@ -358,6 +358,7 @@ class TieredSearchTests(unittest.TestCase):
             self.assertTrue(result.ok)
             self.assertEqual(result.path, str(original))
             self.assertEqual(original.read_bytes(), b"replacement")
+            self.assertFalse(result.created_this_run)
 
     def test_ytmusic_search_is_tried_first(self):
         track = dl.Track(name="Song", artists="Artist")
@@ -567,7 +568,7 @@ class PreviewHealthHistoryTests(unittest.TestCase):
         url = "https://www.youtube.com/watch?v=video123"
         args = dl.parse_args(["download", "--json-events", "--output-dir", "/tmp/music", url])
         output = io.StringIO()
-        result = dl.DownloadResult(True, "Channel - Song", "Song.mp3", "/tmp/music/Song.mp3")
+        result = dl.DownloadResult(True, "Channel - Song", "Song.mp3", "/tmp/music/Song.mp3", created_this_run=True)
         with (
             patch.object(
                 dl,
@@ -590,6 +591,7 @@ class PreviewHealthHistoryTests(unittest.TestCase):
         self.assertEqual(events[-1]["event"], "track_progress")
         self.assertEqual(events[-1]["state"], "succeeded")
         self.assertEqual(events[-1]["path"], "/tmp/music/Song.mp3")
+        self.assertTrue(events[-1]["created_this_run"])
 
     def test_append_history_writes_jsonl_record(self):
         with tempfile.TemporaryDirectory() as tmp:
