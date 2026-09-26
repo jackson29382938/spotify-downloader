@@ -14,6 +14,7 @@ The script exposes several subcommands consumed by the native macOS app:
     health          Emit a JSON diagnostics report.
     library         Scan/repair an existing music library's metadata.
     embed-lrc       Move .lrc sidecar lyrics into the audio files themselves.
+    clean-lyrics    Strip timestamps from embedded lyrics (clean text for Apple Music).
     ffmpeg-install  Install ffmpeg with Homebrew on macOS.
 """
 
@@ -105,6 +106,9 @@ MANIFEST_FILENAME = ".spotify-downloader-manifest.jsonl"
 HISTORY_FILENAME = "download-history.jsonl"
 LOG = logging.getLogger("spotify_downloader")
 DEFAULT_MIN_CONFIDENCE = 0.72
+# 0 = strictest YouTube matching, 1 = loosest (closest-duration fallback).
+# 0.25 reproduces the long-standing strict defaults (30 s duration window).
+DEFAULT_MATCH_FLEXIBILITY = 0.25
 DEFAULT_RENAME_PATTERN = "{track_number}. {title} - {artist}"
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".opus", ".ogg", ".wav", ".aac"}
 RESERVED_DEVICE_NAMES = {
@@ -220,6 +224,7 @@ class RunOptions:
     overwrite: str = "skip"
     track_number_prefix: bool = True
     allow_closest_match: bool = False
+    match_flexibility: float = DEFAULT_MATCH_FLEXIBILITY
     lyrics: bool = True
     lyrics_style: str = "plain"
     write_lrc: bool = False
@@ -239,6 +244,7 @@ class RunOptions:
             overwrite=getattr(args, "overwrite", "skip"),
             track_number_prefix=getattr(args, "track_number_prefix", True),
             allow_closest_match=getattr(args, "allow_closest_match", False),
+            match_flexibility=max(0.0, min(1.0, getattr(args, "match_flexibility", DEFAULT_MATCH_FLEXIBILITY))),
             lyrics=getattr(args, "lyrics", True),
             lyrics_style=getattr(args, "lyrics_style", "plain"),
             write_lrc=getattr(args, "write_lrc", False),
@@ -338,6 +344,26 @@ def safe(name: str) -> str:
 # ---------------------------------------------------------------------------
 # JSON events & history
 # ---------------------------------------------------------------------------
+
+
+OUTPUT_LOCK = threading.Lock()
+
+
+def print(*values: object, sep: str | None = " ", end: str | None = "\n", file=None, flush: bool = False) -> None:  # noqa: A001
+    """Thread-safe print: each call becomes one write of the whole line.
+
+    The built-in print writes the text and the newline separately, so with
+    several download threads a JSON progress event could be split by another
+    thread's output. The app then missed that song's final state.
+    """
+    stream = file if file is not None else sys.stdout
+    if stream is None:
+        return
+    text = (" " if sep is None else sep).join(str(value) for value in values) + ("\n" if end is None else end)
+    with OUTPUT_LOCK:
+        stream.write(text)
+        if flush:
+            stream.flush()
 
 
 def emit_json_event(enabled: bool, event: str, **fields: object) -> None:
@@ -1415,15 +1441,28 @@ def primary_artist(artists: str) -> str:
     return first or artists
 
 
+SEARCH_OPERATOR_RE = re.compile(r'(^|\s)[-+~]+(?=\S)')
+
+
+def search_safe(text: str) -> str:
+    """Remove characters YouTube treats as search operators.
+
+    An artist named "-Prey" would otherwise exclude every result containing
+    "Prey", and quotes would force exact-phrase matching.
+    """
+    text = SEARCH_OPERATOR_RE.sub(r"\1", text.replace('"', " "))
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def youtube_search_queries(track: Track, limit: int = 10) -> list[str]:
     """Distinct search routes, cheapest and most reliable first.
 
     Searches are flat (no per-video page loads), so every route can be tried
     for one track without tripping YouTube's bot check.
     """
-    title = clean_track_title(track.name)
-    base = f"{track.artists} - {title}"
-    lead = f"{primary_artist(track.artists)} - {title}"
+    title = search_safe(clean_track_title(track.name))
+    base = f"{search_safe(track.artists)} - {title}"
+    lead = f"{search_safe(primary_artist(track.artists))} - {title}"
     return [
         f"ytsearch{limit}:{base}",
         f"ytsearch{limit}:{lead} official audio",
@@ -1596,6 +1635,7 @@ def find_youtube_candidate(
     allow_closest: bool = False,
     cookies_browser: str | None = None,
     exclude_ids: set[str] | None = None,
+    flexibility: float = DEFAULT_MATCH_FLEXIBILITY,
 ) -> tuple[dict | None, str]:
     """Search each tier independently so one extractor failure cannot abort all fallbacks."""
     reason = "no YouTube results"
@@ -1615,7 +1655,7 @@ def find_youtube_candidate(
         candidates = [candidate for candidate in candidates if candidate.get("id") not in excluded]
         if not candidates:
             continue
-        chosen, reason = choose_youtube_candidate(candidates, track, allow_closest)
+        chosen, reason = choose_youtube_candidate(candidates, track, allow_closest, flexibility)
         if chosen:
             return chosen, reason
 
@@ -1639,19 +1679,41 @@ def choose_youtube_candidate(
     candidates: list[dict],
     track: Track,
     allow_closest: bool = False,
+    flexibility: float = DEFAULT_MATCH_FLEXIBILITY,
 ) -> tuple[dict | None, str]:
+    """Pick the upload that matches the track, or explain why none did.
+
+    `flexibility` (0-1) loosens the rules step by step:
+      - duration window grows from 20 s to 60 s (30 s at the 0.25 default);
+      - from 0.4, a title may match by most of its words instead of all;
+      - from 0.6, the artist may be missing when title and length agree;
+      - at 1.0, the closest-length result is used as a last resort.
+    """
     if not candidates:
         return None, "no YouTube results"
+
+    flexibility = max(0.0, min(1.0, flexibility))
+    duration_limit = 20 + 40 * flexibility
+    word_coverage_needed = 1 - 0.5 * flexibility if flexibility >= 0.4 else 1.0
+    allow_missing_artist = flexibility >= 0.6
+    allow_closest = allow_closest or flexibility >= 1.0
 
     expected_duration = duration_seconds(track)
     cleaned_title = clean_track_title(track.name)
     title = normalize_match_text(cleaned_title)
+    title_words = title.split()
     track_modifiers = extract_modifiers(cleaned_title)
     artists = artist_tokens(track.artists)
 
     def title_ok(candidate: dict) -> bool:
         candidate_text = normalize_match_text(str(candidate.get("title") or ""))
-        return bool(title and title in candidate_text)
+        if title and title in candidate_text:
+            return True
+        if word_coverage_needed >= 1.0 or len(title_words) < 2:
+            return False
+        candidate_words = set(candidate_text.split())
+        covered = sum(1 for word in title_words if word in candidate_words)
+        return covered / len(title_words) >= word_coverage_needed
 
     def title_exact(candidate: dict) -> bool:
         candidate_text = normalize_match_text(str(candidate.get("title") or ""))
@@ -1674,20 +1736,26 @@ def choose_youtube_candidate(
         # A studio track should not pick up a live, sped-up, or cover upload.
         return extract_modifiers(str(candidate.get("title") or "")) == track_modifiers
 
+    def closest_by_duration(pool: list[dict]) -> tuple[dict | None, float]:
+        timed = [candidate for candidate in pool if candidate.get("duration")]
+        if not expected_duration or not timed:
+            return None, 0.0
+        chosen = min(timed, key=lambda item: abs(float(item["duration"]) - expected_duration))
+        return chosen, abs(float(chosen["duration"]) - expected_duration)
+
     artist_available = any(artist_ok(candidate) for candidate in candidates)
 
     strict_pool = [candidate for candidate in candidates if title_ok(candidate) and artist_ok(candidate)]
     strict_pool = [candidate for candidate in strict_pool if same_version(candidate)] or strict_pool
     if strict_pool:
-        if expected_duration:
-            timed = [candidate for candidate in strict_pool if candidate.get("duration")]
-            if timed:
-                chosen = min(timed, key=lambda item: abs(float(item["duration"]) - expected_duration))
-                diff = abs(float(chosen["duration"]) - expected_duration)
-                if diff <= 30:
-                    return chosen, "title, artist, and duration matched"
-                return None, f"closest title match was {diff:.0f}s off"
-        return strict_pool[0], "title and artist matched"
+        chosen, diff = closest_by_duration(strict_pool)
+        if chosen is not None:
+            if diff <= duration_limit:
+                return chosen, "title, artist, and duration matched"
+            if not allow_closest:
+                return None, f"closest title match was {diff:.0f}s off (limit {duration_limit:.0f}s)"
+        elif not expected_duration:
+            return strict_pool[0], "title and artist matched"
 
     # When the artist never appears in the results but the title (and any
     # version modifier such as "sped up") matches exactly, this is usually a
@@ -1700,20 +1768,21 @@ def choose_youtube_candidate(
         ]
         if exact_pool:
             if expected_duration:
-                timed = [candidate for candidate in exact_pool if candidate.get("duration")]
-                if timed:
-                    chosen = min(timed, key=lambda item: abs(float(item["duration"]) - expected_duration))
-                    diff = abs(float(chosen["duration"]) - expected_duration)
-                    if diff <= 30:
-                        return chosen, f"title matched, artist unavailable ({diff:.0f}s off)"
+                chosen, diff = closest_by_duration(exact_pool)
+                if chosen is not None and diff <= duration_limit:
+                    return chosen, f"title matched, artist unavailable ({diff:.0f}s off)"
             else:
                 return exact_pool[0], "title matched, artist unavailable"
 
+    if allow_missing_artist:
+        title_pool = [candidate for candidate in candidates if title_ok(candidate) and same_version(candidate)]
+        chosen, diff = closest_by_duration(title_pool)
+        if chosen is not None and diff <= 5:
+            return chosen, f"title and duration matched; artist not listed ({diff:.0f}s off)"
+
     if allow_closest and expected_duration:
-        timed = [candidate for candidate in candidates if candidate.get("duration")]
-        if timed:
-            chosen = min(timed, key=lambda item: abs(float(item["duration"]) - expected_duration))
-            diff = abs(float(chosen["duration"]) - expected_duration)
+        chosen, diff = closest_by_duration(candidates)
+        if chosen is not None:
             return chosen, f"artist unmatched; closest duration match ({diff:.0f}s off)"
     if allow_closest:
         return candidates[0], "artist unmatched; closest result selected"
@@ -2038,6 +2107,7 @@ def download_track(
                 options.allow_closest_match,
                 options.cookies_browser,
                 rejected_ids,
+                options.match_flexibility,
             )
             if not chosen:
                 error_detail = reason
@@ -2209,15 +2279,20 @@ def download_collection(
     def run_one(index: int, track: Track) -> tuple[int, Track, DownloadResult]:
         pos = index if collection.use_subfolder else None
         track_progress_event(options, track, pos, len(collection.tracks), "running", 0.05, "Searching")
-        result = download_track(
-            track,
-            output_dir,
-            pos,
-            len(collection.tracks),
-            options,
-            collection.track_cover_fallback_url,
-            manifest_done,
-        )
+        try:
+            result = download_track(
+                track,
+                output_dir,
+                pos,
+                len(collection.tracks),
+                options,
+                collection.track_cover_fallback_url,
+                manifest_done,
+            )
+        except Exception as exc:
+            # One song's unexpected error must not stop the rest of the playlist.
+            LOG.exception("unexpected error downloading %s - %s", track.artists, track.name)
+            result = DownloadResult(False, f"{track.artists} - {track.name}", f"unexpected error: {exc}")
         return index, track, result
 
     def handle_result(index: int, track: Track, result: DownloadResult) -> None:
@@ -2838,6 +2913,82 @@ def repair_library(args: argparse.Namespace) -> int:
     return 0 if failed == 0 else 1
 
 
+def read_embedded_lyrics(path: Path) -> str | None:
+    """The text in the file's standard lyrics tag, if any."""
+    if not HAS_MUTAGEN:
+        return None
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".mp3":
+            frames = ID3(str(path)).getall("USLT")
+            return frames[0].text if frames else None
+        if suffix == ".m4a":
+            values = MP4(str(path)).get("\xa9lyr")
+            return values[0] if values else None
+        if suffix in {".flac", ".opus", ".ogg"}:
+            audio = FLAC(str(path)) if suffix == ".flac" else (OggOpus(str(path)) if suffix == ".opus" else OggVorbis(str(path)))
+            values = audio.get("lyrics")
+            return values[0] if values else None
+    except Exception as exc:
+        LOG.info("could not read lyrics from %s: %s", path, exc)
+    return None
+
+
+def clean_lyrics_timestamps(args: argparse.Namespace) -> int:
+    """Rewrite timestamped (LRC) lyrics tags as plain text.
+
+    Apple Music shows the lyrics tag as-is and cannot scroll lyrics for local
+    files, so "[00:42.92] Ooh yeah" appears literally. The plain text goes
+    back into the lyrics tag; MP3 files keep the timing in a SYLT frame.
+    """
+    json_events = getattr(args, "json_events", False)
+    files = [
+        path
+        for path in iter_library_files(list(args.folders), getattr(args, "recursive", True))
+        if path.suffix.lower() in {".mp3", ".m4a", ".flac", ".opus", ".ogg"}
+    ]
+    total = len(files)
+    print(f"Checking lyrics in {total} audio file(s).", flush=True)
+    emit_json_event(json_events, "collection_start", title="Clean Lyrics", track_count=total, selected_count=total, total=total)
+
+    cleaned = 0
+    failed = 0
+    for index, path in enumerate(files, 1):
+        if STOP_EVENT.is_set():
+            break
+        text = read_embedded_lyrics(path)
+        if not text or not LRC_TIMESTAMP_RE.search(text):
+            continue
+        try:
+            if not embed_lyrics(path, lyrics_from_lrc_text(text), "plain"):
+                raise ValueError("format does not support embedded lyrics")
+            cleaned += 1
+            state, message = "succeeded", "Removed timestamps from lyrics"
+        except Exception as exc:
+            failed += 1
+            state, message = "failed", str(exc)
+            LOG.warning("could not clean lyrics in %s: %s", path, exc)
+        emit_json_event(
+            json_events,
+            "track_progress",
+            key=f"clean-lyrics:{path}",
+            index=index,
+            total=total,
+            label=path.name,
+            title=path.stem,
+            artists="",
+            progress=1.0,
+            state=state,
+            message=message,
+            path=str(path),
+        )
+        print(f"  [{index}/{total}] {message}: {path.name}", flush=True)
+
+    print(f"Cleaned lyrics in {cleaned} file(s).", flush=True)
+    emit_json_event(json_events, "collection_finished", title="Clean Lyrics", ok_count=cleaned, failed_count=failed)
+    return 0 if failed == 0 else 1
+
+
 def lrc_sidecar_pairs(folders: list[str], recursive: bool) -> list[tuple[Path, Path]]:
     """Audio files that have a same-named .lrc file next to them."""
     pairs: list[tuple[Path, Path]] = []
@@ -3034,6 +3185,14 @@ def create_parser() -> argparse.ArgumentParser:
     download.add_argument("--track-number-prefix", dest="track_number_prefix", action="store_true", default=True, help="Prefix files with their track number.")
     download.add_argument("--no-track-number-prefix", dest="track_number_prefix", action="store_false", help="Do not prefix files with their track number.")
     download.add_argument("--allow-closest-match", action="store_true", help="Use the closest duration match if no confident match is found.")
+    download.add_argument(
+        "--match-flexibility",
+        dest="match_flexibility",
+        type=float,
+        default=DEFAULT_MATCH_FLEXIBILITY,
+        help="0 = strictest YouTube matching, 1 = loosest (default %(default)s). Higher values allow longer "
+        "duration differences, partial titles, and uploads that do not name the artist.",
+    )
     add_lyrics_flags(download)
     download.add_argument("--lrc", dest="write_lrc", action="store_true", default=False, help="Also write synced lyrics to a .lrc sidecar file.")
     download.add_argument("--no-lrc", dest="write_lrc", action="store_false", help="Do not write .lrc sidecar files (default).")
@@ -3077,6 +3236,14 @@ def create_parser() -> argparse.ArgumentParser:
     embed_lrc.add_argument("--keep-lrc", action="store_true", help="Keep the .lrc files after embedding.")
     add_lyrics_style_flag(embed_lrc)
     embed_lrc.add_argument("--json-events", dest="json_events", action="store_true", help="Emit JSON progress events.")
+
+    clean_lyrics = subparsers.add_parser(
+        "clean-lyrics", help="Strip [00:12.34] timestamps from embedded lyrics so Apple Music shows clean text."
+    )
+    clean_lyrics.add_argument("folders", nargs="+", help="Folders to scan.")
+    clean_lyrics.add_argument("--recursive", dest="recursive", action="store_true", default=True, help="Include subfolders.")
+    clean_lyrics.add_argument("--no-recursive", dest="recursive", action="store_false", help="Do not include subfolders.")
+    clean_lyrics.add_argument("--json-events", dest="json_events", action="store_true", help="Emit JSON progress events.")
 
     return parser
 
@@ -3273,6 +3440,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "library":
         try:
             return repair_library(args)
+        except KeyboardInterrupt:
+            print("Cancelled.", flush=True)
+            return 130
+
+    if args.command == "clean-lyrics":
+        try:
+            return clean_lyrics_timestamps(args)
         except KeyboardInterrupt:
             print("Cancelled.", flush=True)
             return 130

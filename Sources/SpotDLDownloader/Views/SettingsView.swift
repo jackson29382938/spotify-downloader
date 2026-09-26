@@ -16,6 +16,7 @@ struct SettingsView: View {
             AdvancedSettingsTab()
                 .tabItem { Label("Advanced", systemImage: "wrench.and.screwdriver") }
         }
+        .textSelection(.enabled)
         .frame(width: 560)
         .frame(minHeight: 380)
     }
@@ -199,7 +200,6 @@ private struct LyricsSettingsTab: View {
 
 private struct YouTubeSettingsTab: View {
     @AppStorage("cookiesBrowser") private var cookiesBrowser = CookiesBrowser.none.rawValue
-    @AppStorage("allowClosestMatch") private var allowClosestMatch = false
 
     var body: some View {
         Form {
@@ -223,10 +223,10 @@ private struct YouTubeSettingsTab: View {
 
             Section("Matching") {
                 SettingHelpRow(
-                    title: "Closest-match fallback",
-                    help: "Off rejects uncertain matches. On may recover international tracks whose YouTube titles use another script."
+                    title: "Match flexibility",
+                    help: "If tracks fail with \"no confident title and artist match\", slide toward Flexible and retry them."
                 ) {
-                    Toggle("Closest-match fallback", isOn: $allowClosestMatch)
+                    MatchFlexibilityControl(sliderWidth: 220, showsHelp: true)
                 }
             }
         }

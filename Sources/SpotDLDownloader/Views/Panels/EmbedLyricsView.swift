@@ -28,9 +28,9 @@ struct EmbedLyricsView: View {
     var body: some View {
         Card {
             VStack(alignment: .leading, spacing: 12) {
-                SectionHeader("Embed .lrc Lyrics", systemImage: "text.quote")
+                SectionHeader("Lyrics Tools", systemImage: "text.quote")
 
-                Text("Finds songs with a matching .lrc file in your download folder and library folders, writes the lyrics inside the song, then removes the .lrc file.")
+                Text("Embed Lyrics finds songs with a matching .lrc file in your download and library folders, writes the lyrics inside the song, then removes the .lrc file. Remove Timestamps turns lyrics like “[00:42.92] Ooh yeah” back into clean text for Apple Music, which can’t scroll lyrics for your own files.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -67,6 +67,14 @@ struct EmbedLyricsView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(!viewModel.canRepairLibrary)
+
+                    Button {
+                        viewModel.cleanLyricsTimestamps(folders: targetFolders, recursive: libraryRecursive)
+                    } label: {
+                        Label("Remove Timestamps", systemImage: "clock.badge.xmark")
+                    }
+                    .disabled(!viewModel.canRepairLibrary)
+                    .help("Rewrite timestamped lyrics as clean text. MP3s keep the timing in a hidden frame.")
 
                     Spacer()
 

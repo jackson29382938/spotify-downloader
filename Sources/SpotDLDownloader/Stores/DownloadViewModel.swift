@@ -190,6 +190,7 @@ final class DownloadViewModel: ObservableObject {
         overwrite: ExistingFileBehavior,
         trackNumberPrefix: Bool,
         allowClosestMatch: Bool,
+        matchFlexibility: Double,
         searchLyrics: Bool,
         lyricsStyle: LyricsStyle,
         writeLRC: Bool,
@@ -235,6 +236,7 @@ final class DownloadViewModel: ObservableObject {
             overwrite: overwrite,
             trackNumberPrefix: trackNumberPrefix,
             allowClosestMatch: allowClosestMatch,
+            matchFlexibility: matchFlexibility,
             searchLyrics: searchLyrics,
             lyricsStyle: lyricsStyle,
             writeLRC: writeLRC,
@@ -334,6 +336,7 @@ final class DownloadViewModel: ObservableObject {
         overwrite: ExistingFileBehavior,
         trackNumberPrefix: Bool,
         allowClosestMatch: Bool,
+        matchFlexibility: Double,
         searchLyrics: Bool,
         lyricsStyle: LyricsStyle,
         writeLRC: Bool,
@@ -356,6 +359,7 @@ final class DownloadViewModel: ObservableObject {
             overwrite: overwrite,
             trackNumberPrefix: trackNumberPrefix,
             allowClosestMatch: allowClosestMatch,
+            matchFlexibility: matchFlexibility,
             searchLyrics: searchLyrics,
             lyricsStyle: lyricsStyle,
             writeLRC: writeLRC,
@@ -478,6 +482,47 @@ final class DownloadViewModel: ObservableObject {
 
     /// Moves lyrics from `.lrc` sidecar files into the matching audio files.
     func embedLRCFiles(folders: [String], recursive: Bool, keepLRC: Bool, lyricsStyle: LyricsStyle) {
+        runLyricsTask(
+            folders: folders,
+            title: "Embedding Lyrics",
+            commandName: "embed-lrc",
+            failureMessage: "Some lyrics could not be embedded. See the progress list for details."
+        ) { service, validFolders, output, completion in
+            try service.embedLRCFiles(
+                folders: validFolders,
+                recursive: recursive,
+                keepLRC: keepLRC,
+                lyricsStyle: lyricsStyle,
+                output: output,
+                completion: completion
+            )
+        }
+    }
+
+    /// Rewrites lyrics tags that contain [00:12.34] timestamps as clean text.
+    func cleanLyricsTimestamps(folders: [String], recursive: Bool) {
+        runLyricsTask(
+            folders: folders,
+            title: "Removing Lyric Timestamps",
+            commandName: "clean-lyrics",
+            failureMessage: "Some lyrics could not be cleaned. See the progress list for details."
+        ) { service, validFolders, output, completion in
+            try service.cleanLyricsTimestamps(
+                folders: validFolders,
+                recursive: recursive,
+                output: output,
+                completion: completion
+            )
+        }
+    }
+
+    private func runLyricsTask(
+        folders: [String],
+        title: String,
+        commandName: String,
+        failureMessage: String,
+        start: (DownloadService, [String], @escaping (String) -> Void, @escaping (Int32) -> Void) throws -> Void
+    ) {
         let validFolders = folders.filter { FileManager.default.fileExists(atPath: $0) }
         guard validFolders.isEmpty == false else {
             errorMessage = "Choose at least one existing music folder."
@@ -490,24 +535,22 @@ final class DownloadViewModel: ObservableObject {
         activityLines.removeAll()
         progressSource = .library
         progressItems = []
-        progressSummary = DownloadProgressSummary(title: "Embedding Lyrics")
+        progressSummary = DownloadProgressSummary(title: title)
         let folderArgs = validFolders.map { "\"\($0)\"" }.joined(separator: " ")
-        lastCommand = "embed-lrc \(folderArgs)"
+        lastCommand = "\(commandName) \(folderArgs)"
         status = .repairing(startedAt: Date())
         appendLog("$ \(lastCommand)\n\n")
 
         do {
-            try service.embedLRCFiles(
-                folders: validFolders,
-                recursive: recursive,
-                keepLRC: keepLRC,
-                lyricsStyle: lyricsStyle,
-                output: { [weak self] text in
+            try start(
+                service,
+                validFolders,
+                { [weak self] text in
                     DispatchQueue.main.async {
                         self?.processOutput(text)
                     }
                 },
-                completion: { [weak self] code in
+                { [weak self] code in
                     DispatchQueue.main.async {
                         guard let self else { return }
                         self.flushOutputBuffer()
@@ -519,7 +562,7 @@ final class DownloadViewModel: ObservableObject {
                             self.recalculateProgressSummary()
                         } else {
                             self.status = .failed(code: code)
-                            self.errorMessage = "Some lyrics could not be embedded. See the progress list for details."
+                            self.errorMessage = failureMessage
                             self.recalculateProgressSummary()
                         }
                     }

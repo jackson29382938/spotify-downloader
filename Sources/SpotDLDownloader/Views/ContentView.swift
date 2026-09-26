@@ -30,6 +30,8 @@ struct ContentView: View {
                 .navigationTitle(currentSection.title)
                 .toolbar { toolbarContent }
         }
+        // Every label, status, and error in the window can be selected and copied.
+        .textSelection(.enabled)
         .task {
             viewModel.checkDownloader()
             viewModel.refreshHealth(outputFolder: downloadFolderPath)

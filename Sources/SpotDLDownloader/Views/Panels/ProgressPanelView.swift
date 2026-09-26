@@ -101,6 +101,17 @@ private struct ProgressSongRow: View {
                     .tint(progressTint(for: item.state))
             }
         }
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button("Copy") {
+                copyToPasteboard("\(title)\n\(item.detailText)")
+            }
+            if let path = item.path, path.isEmpty == false {
+                Button("Copy File Path") {
+                    copyToPasteboard(path)
+                }
+            }
+        }
     }
 
     private var title: String {

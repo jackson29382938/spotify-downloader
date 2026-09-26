@@ -275,3 +275,9 @@ func progressTint(for state: ProgressItemState) -> Color {
         .secondary
     }
 }
+
+/// Puts plain text on the clipboard; used by right-click "Copy" actions.
+func copyToPasteboard(_ text: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
+}

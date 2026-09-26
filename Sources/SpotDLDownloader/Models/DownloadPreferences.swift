@@ -117,6 +117,40 @@ enum CookiesBrowser: String, CaseIterable, Identifiable {
     }
 }
 
+/// How loosely YouTube uploads are matched to a track (0 = strict, 1 = loose).
+enum MatchFlexibility {
+    /// Same as the helper's default: the long-standing strict rules.
+    static let defaultValue = 0.25
+
+    static func label(for value: Double) -> String {
+        switch value {
+        case ..<0.15:
+            "Strictest"
+        case ..<0.4:
+            "Strict"
+        case ..<0.6:
+            "Balanced"
+        case ..<0.95:
+            "Flexible"
+        default:
+            "Anything close"
+        }
+    }
+
+    static func help(for value: Double) -> String {
+        switch value {
+        case ..<0.4:
+            "Title, artist, and length must all agree. Fewest wrong songs; obscure tracks may fail."
+        case ..<0.6:
+            "Allows longer length differences and titles that match most of their words."
+        case ..<0.95:
+            "Also accepts uploads that don't name the artist when the title and length agree."
+        default:
+            "Falls back to the result closest in length. Check results: this can pick the wrong song."
+        }
+    }
+}
+
 /// How lyrics are written into the song's standard lyrics tag.
 enum LyricsStyle: String, CaseIterable, Identifiable {
     case plain
@@ -136,9 +170,9 @@ enum LyricsStyle: String, CaseIterable, Identifiable {
     var help: String {
         switch self {
         case .plain:
-            "Readable lyrics that Apple Music and most players show. MP3s also keep line timing in an embedded SYLT frame."
+            "Clean lyrics text, which is what Apple Music shows. MP3s also keep line timing in a hidden SYLT frame for players that use it. Apple Music cannot scroll lyrics for your own files."
         case .synced:
-            "Timestamped lines inside the file, for players that scroll lyrics (Poweramp, MusicBee, foobar2000, Jellyfin, Navidrome). Apple Music shows the timestamps as text."
+            "Timestamped lines for players that scroll lyrics (Poweramp, MusicBee, foobar2000, Jellyfin, Navidrome). Apple Music shows the [00:12.34] timestamps as plain text."
         }
     }
 }

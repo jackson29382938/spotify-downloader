@@ -10,6 +10,7 @@ struct DownloadCommand {
     var overwrite: ExistingFileBehavior
     var trackNumberPrefix: Bool
     var allowClosestMatch: Bool
+    var matchFlexibility: Double
     var searchLyrics: Bool
     var lyricsStyle: LyricsStyle
     var writeLRC: Bool
@@ -45,6 +46,8 @@ struct DownloadCommand {
         if allowClosestMatch {
             values.append("--allow-closest-match")
         }
+
+        values.append(contentsOf: ["--match-flexibility", String(format: "%.2f", min(1, max(0, matchFlexibility)))])
 
         if !searchLyrics {
             values.append("--no-lyrics")

@@ -902,3 +902,105 @@ class EmbeddedLyricsTests(unittest.TestCase):
 
         self.assertEqual(lyrics.plain, "right")
         self.assertEqual(lyrics.synced, "[00:01.00]right")
+
+
+class MatchingReliabilityTests(unittest.TestCase):
+    def test_search_queries_drop_youtube_operators(self):
+        track = dl.Track(name='Someone To Follow', artists="-Prey, Nateki, leah julia, Bodycam")
+        queries = dl.youtube_search_queries(track, limit=10)
+        self.assertEqual(queries[0], "ytsearch10:Prey, Nateki, leah julia, Bodycam - Someone To Follow")
+        self.assertEqual(dl.search_safe('+Artist "Quoted" ~Song - Title'), "Artist Quoted Song - Title")
+
+    def test_hyphen_prefixed_artist_still_matches(self):
+        track = dl.Track(name="Someone To Follow", artists="-Prey, Nateki, leah julia, Bodycam", duration_ms=132_000)
+        candidate = {
+            "id": "right",
+            "title": "-Prey, Nateki & leah julia - Someone To Follow (Official Bodycam Soundtrack)",
+            "channel": "Aurorian Records",
+            "duration": 132,
+        }
+        chosen, _ = dl.choose_youtube_candidate([candidate], track)
+        self.assertEqual(chosen["id"], "right")
+
+    def test_flexibility_widens_duration_window(self):
+        track = dl.Track(name="Song", artists="Artist", duration_ms=200_000)
+        candidate = {"id": "long", "title": "Artist - Song", "channel": "Artist", "duration": 245}
+        self.assertIsNone(dl.choose_youtube_candidate([candidate], track)[0])
+        self.assertEqual(dl.choose_youtube_candidate([candidate], track, flexibility=0.8)[0]["id"], "long")
+
+    def test_flexibility_allows_partial_titles_and_unlisted_artists(self):
+        track = dl.Track(name="Midnight City Lights", artists="Somebody", duration_ms=180_000)
+        partial = {"id": "partial", "title": "Somebody - Midnight City (Lights)", "channel": "Somebody", "duration": 181}
+        unlisted = {"id": "unlisted", "title": "Midnight City Lights", "channel": "Uploads", "duration": 181}
+        self.assertIsNone(dl.choose_youtube_candidate([unlisted], track)[0])
+        self.assertEqual(dl.choose_youtube_candidate([partial], track, flexibility=0.5)[0]["id"], "partial")
+        self.assertEqual(dl.choose_youtube_candidate([unlisted], track, flexibility=0.7)[0]["id"], "unlisted")
+
+    def test_match_flexibility_flag_is_clamped(self):
+        args = dl.parse_args(["download", "--match-flexibility", "4", "https://youtu.be/example"])
+        self.assertEqual(dl.RunOptions.from_args(args).match_flexibility, 1.0)
+        default = dl.parse_args(["download", "https://youtu.be/example"])
+        self.assertEqual(dl.RunOptions.from_args(default).match_flexibility, dl.DEFAULT_MATCH_FLEXIBILITY)
+
+    def test_threaded_output_keeps_every_json_event_whole(self):
+        import threading
+
+        buffer = io.StringIO()
+
+        def work(worker):
+            for index in range(300):
+                dl.emit_json_event(True, "track_progress", key=f"{worker}-{index}", message="x" * 100)
+                dl.print(f"  [{worker}] Done {index}", flush=True)
+
+        with contextlib.redirect_stdout(buffer):
+            threads = [threading.Thread(target=work, args=(worker,)) for worker in range(6)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        events = [line for line in buffer.getvalue().splitlines() if line.startswith("{")]
+        self.assertEqual(len(events), 1800)
+        for line in events:
+            json.loads(line)
+
+    def test_one_track_error_does_not_stop_the_playlist(self):
+        collection = dl.SpotifyCollection(
+            name="Mix", use_subfolder=True,
+            tracks=[dl.Track(name="Boom", artists="A"), dl.Track(name="Fine", artists="B")],
+        )
+
+        def fake_download(track, *_):
+            if track.name == "Boom":
+                raise RuntimeError("surprise")
+            return dl.DownloadResult(True, track.name)
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(dl, "download_track", side_effect=fake_download),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            ok, failed, _, failures, _ = dl.download_collection(collection, dl.RunOptions(), tmp, threads=2, start=1)
+
+        self.assertEqual((ok, failed), (1, 1))
+        self.assertIn("unexpected error: surprise", failures[0])
+
+
+class CleanLyricsTests(unittest.TestCase):
+    def test_timestamped_lyrics_become_plain_text_with_mp3_timing_kept(self):
+        from mutagen.id3 import ID3
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "song.mp3"
+            audio.write_bytes(b"\x00" * 512)
+            synced = "[00:42.92] Ooh yeah, ooh yeah\n[00:48.01] Rat-tailed Jimmy is a second-hand hood\n"
+            dl.embed_lyrics(audio, dl.Lyrics(synced=synced), "synced")
+            self.assertIn("[00:42.92]", ID3(str(audio)).getall("USLT")[0].text)
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = dl.main(["clean-lyrics", tmp])
+
+            tags = ID3(str(audio))
+            self.assertEqual(code, 0)
+            self.assertEqual(tags.getall("USLT")[0].text, "Ooh yeah, ooh yeah\nRat-tailed Jimmy is a second-hand hood")
+            self.assertEqual(tags.getall("SYLT")[0].text[0], ("Ooh yeah, ooh yeah", 42920))

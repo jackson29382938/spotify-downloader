@@ -71,6 +71,8 @@ struct QuickOptionsView: View {
                             .fixedSize()
                             .help("Embed lyrics inside each song. Style and .lrc options are in Settings > Lyrics.")
 
+                        MatchFlexibilityControl()
+
                         AppleMusicPlaylistField()
                     }
 

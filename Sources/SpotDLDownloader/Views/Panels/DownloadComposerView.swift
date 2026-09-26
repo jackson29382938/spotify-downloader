@@ -10,7 +10,7 @@ struct DownloadComposerView: View {
     @AppStorage("bitrate") private var bitrate = Bitrate.kbps192.rawValue
     @AppStorage("overwrite") private var overwrite = ExistingFileBehavior.skip.rawValue
     @AppStorage("trackNumberPrefix") private var trackNumberPrefix = true
-    @AppStorage("allowClosestMatch") private var allowClosestMatch = false
+    @AppStorage("matchFlexibility") private var matchFlexibility = MatchFlexibility.defaultValue
     @AppStorage("searchLyrics") private var searchLyrics = true
     @AppStorage("lyricsStyle") private var lyricsStyle = LyricsStyle.plain.rawValue
     @AppStorage("writeLRCSidecar") private var writeLRC = false
@@ -156,7 +156,8 @@ struct DownloadComposerView: View {
                     bitrate: selectedBitrate,
                     overwrite: selectedOverwrite,
                     trackNumberPrefix: trackNumberPrefix,
-                    allowClosestMatch: allowClosestMatch,
+                    allowClosestMatch: matchFlexibility >= 1,
+                    matchFlexibility: matchFlexibility,
                     searchLyrics: searchLyrics,
                     lyricsStyle: selectedLyricsStyle,
                     writeLRC: writeLRC,
@@ -182,7 +183,8 @@ struct DownloadComposerView: View {
                     bitrate: selectedBitrate,
                     overwrite: selectedOverwrite,
                     trackNumberPrefix: trackNumberPrefix,
-                    allowClosestMatch: allowClosestMatch,
+                    allowClosestMatch: matchFlexibility >= 1,
+                    matchFlexibility: matchFlexibility,
                     searchLyrics: searchLyrics,
                     lyricsStyle: selectedLyricsStyle,
                     writeLRC: writeLRC,

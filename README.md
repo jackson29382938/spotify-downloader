@@ -152,6 +152,15 @@ Move existing `.lrc` files into their songs (and delete the `.lrc` files):
 python3 spotify_dl.py embed-lrc "$HOME/Downloads" "$HOME/Music"
 ```
 
+Apple Music only scrolls time-synced lyrics for songs streamed from its own
+catalog; for your own files it shows the lyrics tag as plain text. If songs show
+`[00:42.92]` timestamps there, turn them back into clean text (MP3 files keep the
+timing in their `SYLT` frame):
+
+```bash
+python3 spotify_dl.py clean-lyrics "$HOME/Downloads" "$HOME/Music"
+```
+
 ## Command Line
 
 Preview the default test track without downloading:
@@ -221,6 +230,9 @@ python3 spotify_dl.py download --no-track-number-prefix <spotify-url>
 
 # Use the closest duration match when strict title/artist matching fails
 python3 spotify_dl.py download --allow-closest-match <spotify-url>
+
+# Loosen matching for obscure tracks (0 = strict, 1 = closest match; default 0.25)
+python3 spotify_dl.py download --match-flexibility 0.6 <spotify-url>
 
 # Write verbose diagnostics to the rotating log
 python3 spotify_dl.py download --debug-log <spotify-url>

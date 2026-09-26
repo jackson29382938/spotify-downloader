@@ -130,6 +130,23 @@ final class DownloadService {
         try runStreaming(arguments: arguments, output: output, completion: completion)
     }
 
+    func cleanLyricsTimestamps(
+        folders: [String],
+        recursive: Bool,
+        output: @escaping (String) -> Void,
+        completion: @escaping (Int32) -> Void
+    ) throws {
+        let folderPaths = folders.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+        var arguments = ProjectPaths.downloaderInvocationPrefix
+            + ["clean-lyrics"]
+            + folderPaths
+            + ["--json-events"]
+        if !recursive {
+            arguments.append("--no-recursive")
+        }
+        try runStreaming(arguments: arguments, output: output, completion: completion)
+    }
+
     func installFFmpeg(
         output: @escaping (String) -> Void,
         completion: @escaping (Int32) -> Void
