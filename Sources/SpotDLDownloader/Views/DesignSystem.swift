@@ -174,7 +174,7 @@ final class CoverImageCache {
             task = existing
         } else {
             task = Task.detached(priority: .utility) { () -> CGImage? in
-                guard let (data, _) = try? await URLSession.shared.data(from: url) else { return nil }
+                guard let data = await CoverImageCache.download(url) else { return nil }
                 return CoverImageCache.thumbnail(from: data)
             }
             inFlight[urlString] = task
@@ -192,6 +192,31 @@ final class CoverImageCache {
         return image
     }
 
+    /// Streams at most 10 MB so an unexpected huge response is never held in memory.
+    nonisolated private static func download(_ url: URL) async -> Data? {
+        let limit = 10 * 1024 * 1024
+        guard let (bytes, response) = try? await URLSession.shared.bytes(from: url) else { return nil }
+        if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) == false {
+            return nil
+        }
+        if response.expectedContentLength > Int64(limit) {
+            return nil
+        }
+        var data = Data()
+        do {
+            for try await byte in bytes {
+                data.append(byte)
+                if data.count > limit {
+                    return nil
+                }
+            }
+        } catch {
+            return nil
+        }
+        return data
+    }
+
+    /// Returns nil for anything that is not a decodable image.
     nonisolated private static func thumbnail(from data: Data) -> CGImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let options: [CFString: Any] = [

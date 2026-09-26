@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import hashlib
 import html
 import io
 import json
@@ -48,6 +49,7 @@ import requests as req
 from yt_dlp import YoutubeDL
 
 try:
+    from mutagen import File as MutagenFile
     from mutagen.easyid3 import EasyID3
     from mutagen.flac import FLAC, Picture
     from mutagen.id3 import APIC, ID3, ID3NoHeaderError, SYLT, USLT
@@ -225,6 +227,9 @@ class RunOptions:
     track_number_prefix: bool = True
     allow_closest_match: bool = False
     match_flexibility: float = DEFAULT_MATCH_FLEXIBILITY
+    # Prefix for progress-event keys, so the same track in two sources of one
+    # run gets two rows instead of overwriting one.
+    source_id: str = ""
     lyrics: bool = True
     lyrics_style: str = "plain"
     write_lrc: bool = False
@@ -374,14 +379,22 @@ def emit_json_event(enabled: bool, event: str, **fields: object) -> None:
     print(json.dumps(record, ensure_ascii=False), flush=True)
 
 
-def append_history(record: dict[str, object]) -> None:
+def append_history(record: dict[str, object]) -> bool:
+    """Record a finished source. A history problem is only a warning: it must
+    never turn a completed download into a failure."""
     path = history_path()
     payload = {"timestamp": datetime.now(timezone.utc).isoformat()}
     payload.update(record)
-    with HISTORY_LOCK:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    try:
+        with HISTORY_LOCK:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        LOG.warning("could not write download history %s: %s", path, exc)
+        print(f"Warning: download history was not saved ({exc}).", file=sys.stderr, flush=True)
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -879,6 +892,34 @@ def stop_download_if_requested(status: dict[str, object]) -> None:
 # ---------------------------------------------------------------------------
 
 
+MAX_COVER_BYTES = 10 * 1024 * 1024
+
+
+def is_image_data(data: bytes) -> bool:
+    return (
+        data.startswith(b"\xff\xd8\xff")
+        or data.startswith(b"\x89PNG\r\n\x1a\n")
+        or (data.startswith(b"RIFF") and data[8:12] == b"WEBP")
+    )
+
+
+def fetch_limited(url: str, limit: int = MAX_COVER_BYTES, timeout: int = 15) -> bytes:
+    """Download at most `limit` bytes; larger responses are rejected unread."""
+    with req.get(url, timeout=timeout, stream=True) as response:
+        response.raise_for_status()
+        declared = response.headers.get("Content-Length")
+        if declared and declared.isdigit() and int(declared) > limit:
+            raise ValueError(f"cover art is too large ({int(declared)} bytes)")
+        chunks: list[bytes] = []
+        size = 0
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            size += len(chunk)
+            if size > limit:
+                raise ValueError(f"cover art is larger than {limit} bytes")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def image_mime(data: bytes) -> str:
     if data.startswith(b"\xff\xd8\xff"):
         return "image/jpeg"
@@ -940,9 +981,9 @@ def cover_bytes(path: Path, track: Track) -> tuple[bytes, str] | None:
         return None
 
     try:
-        response = req.get(track.cover_url, timeout=15)
-        response.raise_for_status()
-        data = response.content
+        data = fetch_limited(track.cover_url)
+        if not is_image_data(data):
+            raise ValueError("response was not a JPEG, PNG, or WebP image")
         return data, image_mime(data)
     except Exception as exc:
         LOG.info("cover fetch failed for %s: %s", track.name, exc)
@@ -1312,6 +1353,27 @@ def read_manifest_entries(output_dir: Path) -> list[dict]:
     return entries
 
 
+def is_complete_audio(path: Path) -> bool:
+    """A resume entry counts only if its file is non-empty, readable audio.
+
+    Truncated or empty files from an interrupted run are downloaded again
+    instead of being skipped forever.
+    """
+    try:
+        if not path.is_file() or path.stat().st_size == 0:
+            return False
+    except OSError:
+        return False
+    if not HAS_MUTAGEN:
+        return True
+    try:
+        audio = MutagenFile(str(path))
+    except Exception:
+        return False
+    length = getattr(getattr(audio, "info", None), "length", 0) or 0
+    return audio is not None and length > 0
+
+
 def load_manifest(output_dir: Path) -> dict[str, Path]:
     completed: dict[str, Path] = {}
     for item in read_manifest_entries(output_dir):
@@ -1320,7 +1382,7 @@ def load_manifest(output_dir: Path) -> dict[str, Path]:
         if not isinstance(key, str) or not isinstance(file_name, str):
             continue
         path = output_dir / file_name
-        if path.is_file():
+        if is_complete_audio(path):
             completed[key] = path
     return completed
 
@@ -1334,7 +1396,7 @@ def load_manifest_tracks(output_dir: Path, fmt: str) -> dict[tuple[str, int], Tr
         if not isinstance(key, str) or not isinstance(file_name, str) or not isinstance(metadata, dict):
             continue
         match = re.fullmatch(r"spotify:([A-Za-z0-9]+):(\d+)", key)
-        if not match or not (output_dir / file_name).is_file() or Path(file_name).suffix.lower() != f".{fmt}":
+        if not match or Path(file_name).suffix.lower() != f".{fmt}" or not is_complete_audio(output_dir / file_name):
             continue
         name, artists = metadata.get("name"), metadata.get("artists")
         if not isinstance(name, str) or not isinstance(artists, str):
@@ -1354,6 +1416,21 @@ def append_manifest(output_dir: Path, key: str, path: Path, track: Track | None 
     with MANIFEST_LOCK:
         with (output_dir / MANIFEST_FILENAME).open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def record_manifest(output_dir: Path, key: str, path: Path, track: Track | None = None) -> str | None:
+    """Add to the resume list; a write failure is returned as a warning."""
+    try:
+        append_manifest(output_dir, key, path, track)
+    except OSError as exc:
+        LOG.warning("could not update resume list in %s: %s", output_dir, exc)
+        return f"resume list not updated ({exc})"
+    return None
+
+
+def join_warnings(*warnings: str | None) -> str | None:
+    joined = "; ".join(warning for warning in warnings if warning)
+    return joined or None
 
 
 def reserve_output_stem(output_dir: Path, stem: str, fmt: str, suffix: str | None) -> str:
@@ -1585,6 +1662,10 @@ def youtube_attempt_options(base_options: dict[str, object], attempt: int, audio
     index = max(0, min(attempt, len(YOUTUBE_DOWNLOAD_STRATEGIES) - 1))
     _, clients, audio_format = YOUTUBE_DOWNLOAD_STRATEGIES[index]
     options = with_js_runtimes(dict(base_options))
+    # yt-dlp's own progress bar writes "\r[download] 45%" to stdout with no
+    # newline, even in quiet mode. Another thread's JSON event could then be
+    # glued onto that text and missed by the app. The app shows its own progress.
+    options["noprogress"] = True
     if clients:
         options["extractor_args"] = {"youtube": {"player_client": clients}}
     if audio:
@@ -1967,6 +2048,10 @@ def download_youtube_media(url: str, options: RunOptions) -> DownloadResult:
             with YoutubeDL(attempt_options) as ydl:
                 info = first_youtube_info(ydl.extract_info(url, download=True))
                 path = downloaded_file_path(info, ydl, preferred_ext)
+                if path is None:
+                    error_detail = f"yt-dlp finished but the saved file could not be found in {output_dir}"
+                    LOG.warning("direct YouTube %s: %s (%s)", method, error_detail, url)
+                    continue
                 detail = downloaded_file_detail(info, ydl, preferred_ext)
                 if attempt > 0:
                     detail = f"{detail} via {method}"
@@ -1974,8 +2059,8 @@ def download_youtube_media(url: str, options: RunOptions) -> DownloadResult:
                     True,
                     youtube_label(info),
                     detail,
-                    str(path) if path else None,
-                    created_this_run=path is not None and path not in preexisting_paths,
+                    str(path),
+                    created_this_run=path not in preexisting_paths,
                 )
         except Exception as exc:
             error_detail = str(exc).strip()[:700]
@@ -2069,15 +2154,16 @@ def download_track(
 
     existing = existing_output(output_dir, stem, options.fmt)
     if existing and options.overwrite == "skip":
-        append_manifest(output_dir, key, existing, track)
-        return DownloadResult(True, label, f"skip exists: {existing.name}", str(existing), True)
+        warning = record_manifest(output_dir, key, existing, track)
+        return DownloadResult(True, label, f"skip exists: {existing.name}", str(existing), True, warning=warning)
     if existing and options.overwrite == "metadata":
         working = enriched_track(track, fallback_cover_url)
         lyrics = apply_track_lyrics(existing, working, options)
         warning = tag(existing, working, pos, lyrics, options.artwork_max_size, options.artwork_jpeg, options.lyrics_style)
-        append_manifest(output_dir, key, existing, working)
+        warning = join_warnings(warning, record_manifest(output_dir, key, existing, working))
         detail = f"metadata refreshed: {existing.name}" if not warning else f"audio kept; {warning}"
-        return DownloadResult(True, label, detail, str(existing), True, warning=warning)
+        # The file existed before this run, so Cancel & Delete must never remove it.
+        return DownloadResult(True, label, detail, str(existing), skipped=True, created_this_run=False, warning=warning)
     working_track = enriched_track(track, fallback_cover_url)
     total_attempts = max(1, options.retries + 1)
     reserved_stem: str | None = None
@@ -2162,15 +2248,21 @@ def download_track(
             lyrics = apply_track_lyrics(final, working_track, options)
             warning = tag(final, working_track, pos, lyrics, options.artwork_max_size, options.artwork_jpeg, options.lyrics_style)
             if existing and options.overwrite == "force":
+                # The audio swap is the operation that matters; once it succeeds the
+                # track is replaced. The .lrc sidecar follows on a best-effort basis.
                 replacement_lrc = final.with_suffix(".lrc")
                 original_lrc = existing.with_suffix(".lrc")
                 final.replace(existing)
-                if replacement_lrc.exists():
-                    replacement_lrc.replace(original_lrc)
-                else:
-                    original_lrc.unlink(missing_ok=True)
                 final = existing
-            append_manifest(output_dir, key, final, working_track)
+                try:
+                    if replacement_lrc.exists():
+                        replacement_lrc.replace(original_lrc)
+                    else:
+                        original_lrc.unlink(missing_ok=True)
+                except OSError as exc:
+                    LOG.warning("could not update %s after replacing audio: %s", original_lrc, exc)
+                    warning = join_warnings(warning, f"audio replaced; .lrc not updated ({exc})")
+            warning = join_warnings(warning, record_manifest(output_dir, key, final, working_track))
             detail = final.name if attempt == 0 else f"{final.name} via {method}"
             if warning:
                 detail += f"; {warning}"
@@ -2217,7 +2309,7 @@ def track_progress_event(
     emit_json_event(
         options.json_events,
         "track_progress",
-        key=track_key(track, pos),
+        key=f"{options.source_id}|{track_key(track, pos)}" if options.source_id else track_key(track, pos),
         index=pos,
         total=total,
         label=f"{track.artists} - {track.name}",
@@ -2376,7 +2468,45 @@ def _collection_output_folder(output_dir: str, collection: SpotifyCollection) ->
     return str(base)
 
 
-def preview_sources(urls: list[str], media: str = "audio", output_dir: str = "downloads") -> tuple[list[dict], list[dict]]:
+PREVIEW_SNAPSHOT_TTL_SECONDS = 15 * 60
+
+
+def preview_snapshot_path(url: str) -> Path:
+    digest = hashlib.sha256(url.strip().encode("utf-8")).hexdigest()[:32]
+    return app_support_dir() / "preview-cache" / f"{digest}.json"
+
+
+def save_preview_snapshot(url: str, collection: SpotifyCollection) -> None:
+    """Keep what Preview showed so Download can start without refetching it."""
+    path = preview_snapshot_path(url)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"url": url.strip(), "saved_at": time.time(), "collection": asdict(collection)}
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except (OSError, TypeError) as exc:
+        LOG.info("could not save preview snapshot for %s: %s", url, exc)
+
+
+def load_preview_snapshot(url: str, max_age: float = PREVIEW_SNAPSHOT_TTL_SECONDS) -> SpotifyCollection | None:
+    """The collection from a recent Preview of this exact link, if any."""
+    path = preview_snapshot_path(url)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("url") != url.strip() or time.time() - float(payload.get("saved_at", 0)) > max_age:
+            return None
+        data = dict(payload["collection"])
+        data["tracks"] = [Track(**track) for track in data["tracks"]]
+        return SpotifyCollection(**data)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def preview_sources(
+    urls: list[str],
+    media: str = "audio",
+    output_dir: str = "downloads",
+    save_snapshots: bool = False,
+) -> tuple[list[dict], list[dict]]:
     items: list[dict] = []
     errors: list[dict] = []
 
@@ -2386,6 +2516,8 @@ def preview_sources(urls: list[str], media: str = "audio", output_dir: str = "do
                 if media == "video":
                     raise ValueError("Spotify links can only be downloaded as audio.")
                 collection = fetch_spotify(url)
+                if save_snapshots:
+                    save_preview_snapshot(url, collection)
                 tracks = [
                     {
                         "position": index if collection.use_subfolder else None,
@@ -3265,6 +3397,7 @@ def run_download(args: argparse.Namespace) -> int:
         )
 
     for url_index, url in enumerate(args.urls, 1):
+        options.source_id = f"source{url_index}" if len(args.urls) > 1 else ""
         if is_spotify_url(url):
             if args.media == "video":
                 print("Spotify links can only be downloaded as audio.", file=sys.stderr, flush=True)
@@ -3272,13 +3405,18 @@ def run_download(args: argparse.Namespace) -> int:
                 finish_source(url, 0, 1)
                 continue
 
-            print(f"Fetching Spotify metadata: {url}", flush=True)
+            collection = load_preview_snapshot(url)
+            if collection is not None:
+                print(f"Using the track list from Preview: {url}", flush=True)
+            else:
+                print(f"Fetching Spotify metadata: {url}", flush=True)
             try:
-                collection = fetch_spotify(
-                    url,
-                    resume_output_root=args.output_dir if options.overwrite == "skip" else None,
-                    resume_format=options.fmt if options.overwrite == "skip" else None,
-                )
+                if collection is None:
+                    collection = fetch_spotify(
+                        url,
+                        resume_output_root=args.output_dir if options.overwrite == "skip" else None,
+                        resume_format=options.fmt if options.overwrite == "skip" else None,
+                    )
             except Exception as exc:
                 print(f"Failed to fetch Spotify metadata: {exc}", file=sys.stderr, flush=True)
                 total_failures += 1
@@ -3422,7 +3560,7 @@ def main(argv: list[str] | None = None) -> int:
         return install_ffmpeg(getattr(args, "json_events", False))
 
     if args.command == "preview":
-        items, errors = preview_sources(args.urls, media=args.media, output_dir=args.output_dir)
+        items, errors = preview_sources(args.urls, media=args.media, output_dir=args.output_dir, save_snapshots=True)
         payload = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "sunnify_parity": SUNNIFY_PARITY,

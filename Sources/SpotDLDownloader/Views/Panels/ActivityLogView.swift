@@ -10,6 +10,14 @@ struct ActivityLogView: View {
                     Text("Newest first")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Button {
+                        copyToPasteboard(viewModel.logText)
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                    .controlSize(.small)
+                    .disabled(viewModel.activityLines.isEmpty)
+                    .help("Copy all activity, oldest first")
                     StatusBadge(status: viewModel.status)
                 }
 

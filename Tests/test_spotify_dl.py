@@ -9,6 +9,9 @@ from unittest.mock import patch
 
 import spotify_dl as dl
 
+# Forty silent MPEG-1 Layer III frames: small, but readable as real audio.
+SILENT_MP3 = (b"\xff\xfb\x90\x64" + b"\x00" * 413) * 40
+
 
 class SpotifyParsingTests(unittest.TestCase):
     def test_parse_spotify_url_supports_locale_urls_and_uris(self):
@@ -290,7 +293,7 @@ class ResumeMetadataTests(unittest.TestCase):
     def test_corrupt_manifest_line_does_not_hide_later_completed_tracks(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
-            (folder / "done.mp3").write_bytes(b"x")
+            (folder / "done.mp3").write_bytes(SILENT_MP3)
             (folder / dl.MANIFEST_FILENAME).write_text(
                 "not-json\n" + json.dumps({"key": "spotify:done:1", "file": "done.mp3"}) + "\n",
                 encoding="utf-8",
@@ -300,7 +303,7 @@ class ResumeMetadataTests(unittest.TestCase):
     def test_cached_manifest_tracks_only_returns_existing_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
-            (folder / "done.mp3").write_bytes(b"x")
+            (folder / "done.mp3").write_bytes(SILENT_MP3)
             (folder / dl.MANIFEST_FILENAME).write_text(
                 "\n".join(
                     [
@@ -338,7 +341,7 @@ class ResumeMetadataTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp) / "Playlist"
             folder.mkdir()
-            (folder / "02. Done - Artist.mp3").write_bytes(b"audio")
+            (folder / "02. Done - Artist.mp3").write_bytes(SILENT_MP3)
             (folder / dl.MANIFEST_FILENAME).write_text(json.dumps({
                 "key": "spotify:done:2",
                 "file": "02. Done - Artist.mp3",
@@ -1004,3 +1007,101 @@ class CleanLyricsTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(tags.getall("USLT")[0].text, "Ooh yeah, ooh yeah\nRat-tailed Jimmy is a second-hand hood")
             self.assertEqual(tags.getall("SYLT")[0].text[0], ("Ooh yeah, ooh yeah", 42920))
+
+
+class ReviewFollowUpTests(unittest.TestCase):
+    def test_resume_ignores_empty_or_broken_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "good.mp3").write_bytes(SILENT_MP3)
+            (folder / "empty.mp3").write_bytes(b"")
+            (folder / "broken.mp3").write_bytes(b"not audio")
+            for key, name in (("spotify:a:1", "good.mp3"), ("spotify:b:2", "empty.mp3"), ("spotify:c:3", "broken.mp3")):
+                dl.append_manifest(folder, key, folder / name)
+            self.assertEqual(set(dl.load_manifest(folder)), {"spotify:a:1"})
+
+    def test_metadata_refresh_is_never_marked_as_created_this_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "Song - Artist.mp3").write_bytes(SILENT_MP3)
+            with (
+                patch.object(dl, "apply_track_lyrics", return_value=None),
+                patch.object(dl, "tag", return_value=None),
+            ):
+                result = dl.download_track(
+                    dl.Track(name="Song", artists="Artist"), folder, None, 1,
+                    dl.RunOptions(overwrite="metadata", lyrics=False), None, {},
+                )
+            self.assertTrue(result.ok)
+            self.assertFalse(result.created_this_run)
+
+    def test_manifest_write_failure_keeps_the_saved_track(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "Song - Artist.mp3").write_bytes(SILENT_MP3)
+            with patch.object(dl, "append_manifest", side_effect=OSError("disk full")):
+                result = dl.download_track(
+                    dl.Track(name="Song", artists="Artist"), folder, None, 1,
+                    dl.RunOptions(lyrics=False), None, {},
+                )
+            self.assertTrue(result.ok)
+            self.assertIn("resume list not updated", result.warning)
+
+    def test_history_write_failure_is_only_a_warning(self):
+        with (
+            patch.object(dl, "history_path", return_value=Path("/proc/forbidden/history.jsonl")),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+        ):
+            self.assertFalse(dl.append_history({"source_url": "x"}))
+        self.assertIn("history was not saved", stderr.getvalue())
+
+    def test_yt_dlp_progress_bar_is_disabled_for_downloads(self):
+        for attempt in range(len(dl.YOUTUBE_DOWNLOAD_STRATEGIES)):
+            self.assertTrue(dl.youtube_attempt_options({}, attempt, audio=True)["noprogress"])
+
+    def test_progress_keys_include_the_source_in_multi_source_runs(self):
+        buffer = io.StringIO()
+        options = dl.RunOptions(json_events=True, source_id="source2")
+        with contextlib.redirect_stdout(buffer):
+            dl.track_progress_event(options, dl.Track(name="Song", artists="A", spotify_id="abc"), 3, 10, "running", 0.1, "Searching")
+        self.assertEqual(json.loads(buffer.getvalue())["key"], "source2|spotify:abc:3")
+
+    def test_oversized_or_non_image_cover_art_is_rejected(self):
+        class Response:
+            def __init__(self, headers, chunks):
+                self.headers = headers
+                self._chunks = chunks
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def raise_for_status(self):
+                pass
+
+            def iter_content(self, chunk_size):
+                return iter(self._chunks)
+
+        with patch.object(dl.req, "get", return_value=Response({"Content-Length": str(dl.MAX_COVER_BYTES + 1)}, [])):
+            with self.assertRaises(ValueError):
+                dl.fetch_limited("https://example.com/big.jpg")
+        track = dl.Track(name="Song", artists="A", cover_url="https://example.com/page.html")
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(dl.req, "get", return_value=Response({}, [b"<html>not an image</html>"])),
+        ):
+            self.assertIsNone(dl.cover_bytes(Path(tmp) / "song.mp3", track))
+
+    def test_download_reuses_a_recent_preview_snapshot(self):
+        collection = dl.SpotifyCollection(
+            name="Mix", use_subfolder=True, kind="playlist",
+            tracks=[dl.Track(name="Song", artists="A", spotify_id="abc", duration_ms=1000)],
+        )
+        url = "https://open.spotify.com/playlist/snapshot123"
+        with tempfile.TemporaryDirectory() as tmp, patch.object(dl, "app_support_dir", return_value=Path(tmp)):
+            dl.save_preview_snapshot(url, collection)
+            self.assertEqual(dl.load_preview_snapshot(url), collection)
+            self.assertIsNone(dl.load_preview_snapshot(url, max_age=-1))
+            self.assertIsNone(dl.load_preview_snapshot("https://open.spotify.com/playlist/other"))

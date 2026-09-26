@@ -58,8 +58,7 @@ final class AppleMusicService {
         process.standardOutput = outputPipe
         process.standardError = outputPipe
 
-        process.terminationHandler = { process in
-            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        Self.run(process, readingFrom: outputPipe) { process, data in
             let output = String(data: data, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
@@ -93,41 +92,54 @@ final class AppleMusicService {
                     )
                 )
             )
-        }
-
-        do {
-            try process.run()
-        } catch {
+        } launchFailed: { error in
             completion(.failure(.launchFailed(error.localizedDescription)))
         }
     }
 
-    /// Names of the user's regular playlists. Returns an empty list without
-    /// launching Music when it is not already open.
-    func existingPlaylistNames(completion: @escaping ([String]) -> Void) {
+    /// Names of the user's regular playlists, or nil when Music is not open
+    /// (it is never launched just to check) or could not be asked.
+    func existingPlaylistNames(completion: @escaping ([String]?) -> Void) {
         let process = Process()
         let outputPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         process.arguments = ["-e", Self.playlistNamesScript]
         process.standardOutput = outputPipe
         process.standardError = FileHandle.nullDevice
-        process.terminationHandler = { process in
-            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            guard process.terminationStatus == 0 else {
-                completion([])
+        Self.run(process, readingFrom: outputPipe) { process, data in
+            let lines = String(decoding: data, as: UTF8.self).components(separatedBy: .newlines)
+            guard process.terminationStatus == 0, lines.first == Self.musicRunningMarker else {
+                completion(nil)
                 return
             }
-            let names = String(decoding: data, as: UTF8.self)
-                .components(separatedBy: .newlines)
-                .filter { $0.isEmpty == false }
-            completion(names)
+            completion(lines.dropFirst().filter { $0.isEmpty == false })
+        } launchFailed: { _ in
+            completion(nil)
         }
+    }
+
+    /// Starts `process` and reads its output while it runs. Reading only after
+    /// exit can deadlock once the output fills the pipe buffer.
+    private static func run(
+        _ process: Process,
+        readingFrom pipe: Pipe,
+        completion: @escaping (Process, Data) -> Void,
+        launchFailed: @escaping (Error) -> Void
+    ) {
         do {
             try process.run()
         } catch {
-            completion([])
+            launchFailed(error)
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            completion(process, data)
         }
     }
+
+    private static let musicRunningMarker = "MUSIC_RUNNING"
 
     private func uniqueCompatiblePaths(from filePaths: [String]) -> [String] {
         var seen = Set<String>()
@@ -153,9 +165,9 @@ final class AppleMusicService {
             end try
         end tell
         set AppleScript's text item delimiters to linefeed
-        return playlistNames as text
+        return "MUSIC_RUNNING" & linefeed & (playlistNames as text)
     end if
-    return ""
+    return "MUSIC_CLOSED"
     """#
 
     private static let importScript = #"""

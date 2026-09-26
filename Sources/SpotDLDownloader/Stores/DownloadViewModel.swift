@@ -51,6 +51,7 @@ final class DownloadViewModel: ObservableObject {
     private var outputLineBuffer = ""
     private var pendingOutputLines: [String] = []
     private var outputFlushScheduled = false
+    private var runCollectionTotal = 0
 
     private static let outputFlushInterval: TimeInterval = 0.15
     private static let maxActivityLines = 1_500
@@ -300,7 +301,9 @@ final class DownloadViewModel: ObservableObject {
                             if code == 0 {
                                 self.status = .succeeded
                                 self.finishRunningQueueItems(as: .succeeded, message: "Complete")
-                                self.recalculateProgressSummary()
+                                // Exit 0 means no song failed, so any row still marked
+                                // running only missed its final message.
+                                self.finishRunningProgressItems(as: .succeeded, message: "Done")
                             } else {
                                 self.status = .failed(code: code)
                                 self.errorMessage = "The downloader exited with code \(code)."
@@ -791,6 +794,7 @@ final class DownloadViewModel: ObservableObject {
     private func resetOutputState() {
         outputLineBuffer = ""
         pendingOutputLines.removeAll()
+        runCollectionTotal = 0
     }
 
     /// Applies every buffered helper line in one pass. The helper can print
@@ -816,9 +820,11 @@ final class DownloadViewModel: ObservableObject {
             }
             switch event.event {
             case "collection_start":
+                // Several links in one run each start a collection; keep a running total.
+                runCollectionTotal += event.selectedCount ?? event.trackCount ?? event.total ?? 0
                 summary = DownloadProgressSummary(
                     title: event.title ?? "Downloading",
-                    total: event.selectedCount ?? event.trackCount ?? event.total ?? summary.total
+                    total: max(runCollectionTotal, summary.total)
                 )
             case "collection_finished":
                 summary.completed = event.okCount ?? summary.completed
@@ -855,9 +861,12 @@ final class DownloadViewModel: ObservableObject {
         appendLogLines(logLines)
     }
 
+    /// Finds a JSON progress event in a line, even when other output (for
+    /// example a stray progress bar without a newline) sits in front of it.
     private func decodeProgressEvent(from line: String) -> DownloadProgressEvent? {
-        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("{"), let data = trimmed.data(using: .utf8) else { return nil }
+        guard let start = line.range(of: "{\"event\"") else { return nil }
+        let json = line[start.lowerBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = json.data(using: .utf8) else { return nil }
         return try? Self.eventDecoder.decode(DownloadProgressEvent.self, from: data)
     }
 
