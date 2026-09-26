@@ -11,6 +11,7 @@ struct DownloadCommand {
     var trackNumberPrefix: Bool
     var allowClosestMatch: Bool
     var searchLyrics: Bool
+    var lyricsStyle: LyricsStyle
     var writeLRC: Bool
     var cookiesBrowser: CookiesBrowser
     var artworkMaxSize: ArtworkMaxSize
@@ -49,8 +50,12 @@ struct DownloadCommand {
             values.append("--no-lyrics")
         }
 
-        if !writeLRC {
-            values.append("--no-lrc")
+        if searchLyrics, lyricsStyle != .plain {
+            values.append(contentsOf: ["--lyrics-style", lyricsStyle.rawValue])
+        }
+
+        if searchLyrics, writeLRC {
+            values.append("--lrc")
         }
 
         if let cookies = cookiesBrowser.flagValue {

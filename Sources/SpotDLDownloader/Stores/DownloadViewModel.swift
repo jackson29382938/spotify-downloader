@@ -1,6 +1,12 @@
 import AppKit
 import Foundation
 
+/// Which page started the run that fills the progress list.
+enum ProgressSource {
+    case download
+    case library
+}
+
 @MainActor
 final class DownloadViewModel: ObservableObject {
     private enum DownloadStopAction {
@@ -27,6 +33,7 @@ final class DownloadViewModel: ObservableObject {
     @Published var appleMusicMessage: String?
     @Published var appleMusicMessageIsError = false
     @Published var isAddingToAppleMusic = false
+    @Published var progressSource = ProgressSource.download
 
     private let service = DownloadService()
     private let appleMusicService = AppleMusicService()
@@ -157,6 +164,7 @@ final class DownloadViewModel: ObservableObject {
         trackNumberPrefix: Bool,
         allowClosestMatch: Bool,
         searchLyrics: Bool,
+        lyricsStyle: LyricsStyle,
         writeLRC: Bool,
         cookiesBrowser: CookiesBrowser,
         artworkMaxSize: ArtworkMaxSize,
@@ -193,6 +201,7 @@ final class DownloadViewModel: ObservableObject {
             trackNumberPrefix: trackNumberPrefix,
             allowClosestMatch: allowClosestMatch,
             searchLyrics: searchLyrics,
+            lyricsStyle: lyricsStyle,
             writeLRC: writeLRC,
             cookiesBrowser: cookiesBrowser,
             artworkMaxSize: artworkMaxSize,
@@ -211,6 +220,7 @@ final class DownloadViewModel: ObservableObject {
         appleMusicMessage = nil
         appleMusicMessageIsError = false
         logText = ""
+        progressSource = .download
         progressItems = []
         progressSummary = DownloadProgressSummary(title: "Starting", total: queries.count)
         lastCommand = command.displayString
@@ -292,6 +302,7 @@ final class DownloadViewModel: ObservableObject {
         trackNumberPrefix: Bool,
         allowClosestMatch: Bool,
         searchLyrics: Bool,
+        lyricsStyle: LyricsStyle,
         writeLRC: Bool,
         cookiesBrowser: CookiesBrowser,
         artworkMaxSize: ArtworkMaxSize,
@@ -313,6 +324,7 @@ final class DownloadViewModel: ObservableObject {
             trackNumberPrefix: trackNumberPrefix,
             allowClosestMatch: allowClosestMatch,
             searchLyrics: searchLyrics,
+            lyricsStyle: lyricsStyle,
             writeLRC: writeLRC,
             cookiesBrowser: cookiesBrowser,
             artworkMaxSize: artworkMaxSize,
@@ -358,6 +370,7 @@ final class DownloadViewModel: ObservableObject {
         apply: Bool,
         recursive: Bool,
         searchLyrics: Bool,
+        lyricsStyle: LyricsStyle,
         updateArtwork: Bool,
         overwriteArtwork: Bool,
         minConfidence: Double,
@@ -373,6 +386,7 @@ final class DownloadViewModel: ObservableObject {
         outputLineBuffer = ""
         errorMessage = nil
         logText = ""
+        progressSource = .library
         progressItems = []
         progressSummary = DownloadProgressSummary(title: apply ? "Applying Library Cleanup" : "Scanning Library")
         let folderArgs = validFolders.map { "\"\($0)\"" }.joined(separator: " ")
@@ -386,6 +400,7 @@ final class DownloadViewModel: ObservableObject {
                 apply: apply,
                 recursive: recursive,
                 searchLyrics: searchLyrics,
+                lyricsStyle: lyricsStyle,
                 updateArtwork: updateArtwork,
                 overwriteArtwork: overwriteArtwork,
                 minConfidence: minConfidence,
@@ -409,6 +424,62 @@ final class DownloadViewModel: ObservableObject {
                             self.status = .failed(code: code)
                             self.errorMessage = "Library cleanup exited with code \(code)."
                             self.finishRunningProgressItems(as: .failed, message: "Exit \(code)")
+                        }
+                    }
+                }
+            )
+        } catch {
+            status = .failed(code: 1)
+            errorMessage = error.localizedDescription
+            appendLog("\n\(error.localizedDescription)\n")
+        }
+    }
+
+    /// Moves lyrics from `.lrc` sidecar files into the matching audio files.
+    func embedLRCFiles(folders: [String], recursive: Bool, keepLRC: Bool, lyricsStyle: LyricsStyle) {
+        let validFolders = folders.filter { FileManager.default.fileExists(atPath: $0) }
+        guard validFolders.isEmpty == false else {
+            errorMessage = "Choose at least one existing music folder."
+            return
+        }
+
+        cancelledByUser = false
+        outputLineBuffer = ""
+        errorMessage = nil
+        logText = ""
+        progressSource = .library
+        progressItems = []
+        progressSummary = DownloadProgressSummary(title: "Embedding Lyrics")
+        let folderArgs = validFolders.map { "\"\($0)\"" }.joined(separator: " ")
+        lastCommand = "embed-lrc \(folderArgs)"
+        status = .repairing(startedAt: Date())
+        appendLog("$ \(lastCommand)\n\n")
+
+        do {
+            try service.embedLRCFiles(
+                folders: validFolders,
+                recursive: recursive,
+                keepLRC: keepLRC,
+                lyricsStyle: lyricsStyle,
+                output: { [weak self] text in
+                    DispatchQueue.main.async {
+                        self?.processOutput(text)
+                    }
+                },
+                completion: { [weak self] code in
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        self.flushOutputBuffer()
+                        if self.cancelledByUser {
+                            self.status = .cancelled
+                            self.finishRunningProgressItems(as: .cancelled, message: "Cancelled")
+                        } else if code == 0 {
+                            self.status = .succeeded
+                            self.recalculateProgressSummary()
+                        } else {
+                            self.status = .failed(code: code)
+                            self.errorMessage = "Some lyrics could not be embedded. See the progress list for details."
+                            self.recalculateProgressSummary()
                         }
                     }
                 }

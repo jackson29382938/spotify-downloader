@@ -4,6 +4,7 @@ struct LibraryRepairView: View {
     @ObservedObject var viewModel: DownloadViewModel
 
     @AppStorage("searchLyrics") private var searchLyrics = true
+    @AppStorage("lyricsStyle") private var lyricsStyle = LyricsStyle.plain.rawValue
     @AppStorage("libraryFolderPaths") private var libraryFolderPathsRaw = Defaults.musicPath
     @AppStorage("libraryRecursive") private var libraryRecursive = true
     @AppStorage("libraryArtwork") private var libraryArtwork = true
@@ -88,6 +89,7 @@ struct LibraryRepairView: View {
                             apply: false,
                             recursive: libraryRecursive,
                             searchLyrics: searchLyrics,
+                            lyricsStyle: LyricsStyle(rawValue: lyricsStyle) ?? .plain,
                             updateArtwork: libraryArtwork,
                             overwriteArtwork: libraryOverwriteArtwork,
                             minConfidence: libraryConfidence
@@ -103,6 +105,7 @@ struct LibraryRepairView: View {
                             apply: true,
                             recursive: libraryRecursive,
                             searchLyrics: searchLyrics,
+                            lyricsStyle: LyricsStyle(rawValue: lyricsStyle) ?? .plain,
                             updateArtwork: libraryArtwork,
                             overwriteArtwork: libraryOverwriteArtwork,
                             minConfidence: libraryConfidence,

@@ -41,6 +41,18 @@ full ledger and [NOTICE.md](NOTICE.md) for attribution.
 
 ## Mac App
 
+The sidebar switches between pages:
+
+- **Download**: paste links, pick media/format/quality, and watch per-song progress.
+- **Preview Queue**: inspect detected tracks, artwork, and output folders before downloading.
+- **History**: past download sessions.
+- **Library Tools**: metadata cleanup, plus **Embed .lrc Lyrics** to move old
+  `.lrc` sidecar files into the songs themselves.
+- **Diagnostics**: helper health checks and the activity log.
+
+Everything else is in **Settings** (⌘,), grouped into General, Audio, Lyrics,
+YouTube, and Advanced tabs.
+
 Paste Spotify or YouTube URLs on separate lines, choose **Audio** or
 **YouTube Video**, then press **Preview** to inspect detected tracks, artwork,
 output folders, and possible errors. Press **Download** when the queue looks
@@ -101,6 +113,35 @@ If `doctor` reports that FFmpeg is missing:
 
 ```bash
 brew install ffmpeg
+```
+
+Install a JavaScript runtime so yt-dlp can unlock every YouTube stream. Without
+one, downloads often fail with `HTTP Error 403: Forbidden`:
+
+```bash
+brew install deno
+```
+
+If YouTube says "Sign in to confirm you're not a bot", choose your browser under
+**Settings > YouTube > Browser cookies** (or pass `--cookies-browser safari`) and
+keep concurrent downloads low.
+
+## Lyrics
+
+Lyrics from LRCLib are written inside each song, not as separate files:
+
+- The standard lyrics tag (MP3 `USLT`, M4A `©lyr`, FLAC/Ogg `LYRICS`) gets
+  readable text that Apple Music and most players show.
+- MP3 files also get an `SYLT` frame with line timing.
+- `--lyrics-style synced` stores timestamped LRC text in the lyrics tag instead,
+  for players that scroll lyrics (Poweramp, MusicBee, foobar2000, Jellyfin,
+  Navidrome).
+- `.lrc` sidecar files are off by default; pass `--lrc` to also write them.
+
+Move existing `.lrc` files into their songs (and delete the `.lrc` files):
+
+```bash
+python3 spotify_dl.py embed-lrc "$HOME/Downloads" "$HOME/Music"
 ```
 
 ## Command Line

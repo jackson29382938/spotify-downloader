@@ -2,6 +2,7 @@ import SwiftUI
 
 struct QueuePanelView: View {
     @ObservedObject var viewModel: DownloadViewModel
+    var fillsHeight = false
 
     @AppStorage("downloadFolderPath") private var downloadFolderPath = Defaults.downloadsPath
 
@@ -55,9 +56,10 @@ struct QueuePanelView: View {
                         )
                         .frame(minWidth: 300, maxWidth: 360)
                     }
-                    .frame(minHeight: 230)
+                    .frame(minHeight: 230, maxHeight: fillsHeight ? CGFloat.infinity : nil)
                 }
             }
+            .frame(maxHeight: fillsHeight ? CGFloat.infinity : nil, alignment: .top)
         }
     }
 }
@@ -197,7 +199,7 @@ private struct QueueDetailView: View {
                         }
                     }
                 }
-                .frame(minHeight: 80, maxHeight: 180)
+                .frame(minHeight: 80, maxHeight: .infinity)
             } else {
                 Text("Select a previewed source to inspect tracks, artwork, output folder, and status.")
                     .font(.callout)

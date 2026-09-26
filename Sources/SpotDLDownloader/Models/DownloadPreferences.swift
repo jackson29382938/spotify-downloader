@@ -117,6 +117,32 @@ enum CookiesBrowser: String, CaseIterable, Identifiable {
     }
 }
 
+/// How lyrics are written into the song's standard lyrics tag.
+enum LyricsStyle: String, CaseIterable, Identifiable {
+    case plain
+    case synced
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .plain:
+            "Plain text"
+        case .synced:
+            "Timestamped (LRC)"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .plain:
+            "Readable lyrics that Apple Music and most players show. MP3s also keep line timing in an embedded SYLT frame."
+        case .synced:
+            "Timestamped lines inside the file, for players that scroll lyrics (Poweramp, MusicBee, foobar2000, Jellyfin, Navidrome). Apple Music shows the timestamps as text."
+        }
+    }
+}
+
 enum ArtworkMaxSize: String, CaseIterable, Identifiable {
     case unlimited
     case px600 = "600"

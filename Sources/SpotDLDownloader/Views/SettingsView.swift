@@ -1,31 +1,39 @@
 import AppKit
 import SwiftUI
 
+/// Settings grouped into tabs (⌘,) instead of one long form.
 struct SettingsView: View {
+    var body: some View {
+        TabView {
+            GeneralSettingsTab()
+                .tabItem { Label("General", systemImage: "gearshape") }
+            AudioSettingsTab()
+                .tabItem { Label("Audio", systemImage: "music.note") }
+            LyricsSettingsTab()
+                .tabItem { Label("Lyrics", systemImage: "text.quote") }
+            YouTubeSettingsTab()
+                .tabItem { Label("YouTube", systemImage: "play.rectangle") }
+            AdvancedSettingsTab()
+                .tabItem { Label("Advanced", systemImage: "wrench.and.screwdriver") }
+        }
+        .frame(width: 560)
+        .frame(minHeight: 380)
+    }
+}
+
+private struct GeneralSettingsTab: View {
     @AppStorage("downloadFolderPath") private var downloadFolderPath = Defaults.downloadsPath
     @AppStorage("downloadThreads") private var downloadThreads = 4
-    @AppStorage("audioFormat") private var audioFormat = AudioFormat.mp3.rawValue
-    @AppStorage("bitrate") private var bitrate = Bitrate.kbps192.rawValue
+    @AppStorage("downloadRetries") private var downloadRetries = 2
     @AppStorage("overwrite") private var overwrite = ExistingFileBehavior.skip.rawValue
     @AppStorage("trackNumberPrefix") private var trackNumberPrefix = true
-    @AppStorage("allowClosestMatch") private var allowClosestMatch = false
-    @AppStorage("searchLyrics") private var searchLyrics = true
-    @AppStorage("writeLRC") private var writeLRC = true
-    @AppStorage("cookiesBrowser") private var cookiesBrowser = CookiesBrowser.none.rawValue
-    @AppStorage("artworkMaxSize") private var artworkMaxSize = ArtworkMaxSize.unlimited.rawValue
-    @AppStorage("artworkJpeg") private var artworkJpeg = false
-    @AppStorage("debugLogging") private var debugLogging = false
-    @AppStorage("showDetailedActivity") private var showDetailedActivity = false
-    @AppStorage("addToAppleMusic") private var addToAppleMusic = false
-    @AppStorage("appleMusicPlaylistName") private var appleMusicPlaylistName = Defaults.appleMusicPlaylistName
-    @AppStorage("downloadRetries") private var downloadRetries = 2
 
     var body: some View {
         Form {
             Section("Downloads") {
                 SettingHelpRow(
                     title: "Download folder",
-                    help: "All selected sources save here. Playlists and albums create their own subfolders."
+                    help: "All sources save here. Playlists and albums create their own subfolders."
                 ) {
                     HStack {
                         TextField("Folder", text: $downloadFolderPath)
@@ -39,7 +47,7 @@ struct SettingsView: View {
 
                 SettingHelpRow(
                     title: "Concurrent downloads",
-                    help: "More workers can speed up playlists, but very high values may trigger service limits."
+                    help: "More workers speed up playlists, but high values make YouTube's bot check more likely. 2–4 is safest."
                 ) {
                     Stepper(value: $downloadThreads, in: 1...16) {
                         Text("\(max(1, downloadThreads)) concurrent downloads")
@@ -48,7 +56,7 @@ struct SettingsView: View {
 
                 SettingHelpRow(
                     title: "Failed-track retries",
-                    help: "Additional attempts after the first failure. Each retry uses a different YouTube search and download method."
+                    help: "Extra attempts after a failed download. Each retry uses a different YouTube player client."
                 ) {
                     Stepper(value: $downloadRetries, in: 0...5) {
                         Text("\(max(0, downloadRetries)) additional retr\(downloadRetries == 1 ? "y" : "ies")")
@@ -56,7 +64,41 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Audio") {
+            Section("Files") {
+                SettingHelpRow(
+                    title: "Existing files",
+                    help: "Skip keeps files, Metadata refreshes tags and lyrics, Replace downloads again."
+                ) {
+                    Picker("Existing files", selection: $overwrite) {
+                        ForEach(ExistingFileBehavior.allCases) { option in
+                            Text(option.label).tag(option.rawValue)
+                        }
+                    }
+                }
+
+                SettingHelpRow(
+                    title: "Track numbers",
+                    help: "Saves playlist files like 01. Song - Artist.mp3 so Finder sorting matches playlist order."
+                ) {
+                    Toggle("Track numbers in filenames", isOn: $trackNumberPrefix)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+private struct AudioSettingsTab: View {
+    @AppStorage("audioFormat") private var audioFormat = AudioFormat.mp3.rawValue
+    @AppStorage("bitrate") private var bitrate = Bitrate.kbps192.rawValue
+    @AppStorage("artworkMaxSize") private var artworkMaxSize = ArtworkMaxSize.unlimited.rawValue
+    @AppStorage("artworkJpeg") private var artworkJpeg = false
+    @AppStorage("addToAppleMusic") private var addToAppleMusic = false
+    @AppStorage("appleMusicPlaylistName") private var appleMusicPlaylistName = Defaults.appleMusicPlaylistName
+
+    var body: some View {
+        Form {
+            Section("Output") {
                 SettingHelpRow(
                     title: "Format",
                     help: "MP3 is most compatible. FLAC and WAV are lossless-style outputs and ignore bitrate."
@@ -78,69 +120,31 @@ struct SettingsView: View {
                         }
                     }
                 }
+            }
 
-                SettingHelpRow(
-                    title: "Existing files",
-                    help: "Skip keeps files, Metadata refreshes tags, Replace downloads again."
-                ) {
-                    Picker("Existing files", selection: $overwrite) {
-                        ForEach(ExistingFileBehavior.allCases) { option in
-                            Text(option.label).tag(option.rawValue)
-                        }
-                    }
-                }
-
-                SettingHelpRow(
-                    title: "Track numbers",
-                    help: "On saves playlist files like 01. Song - Artist.mp3 so Finder sorting matches playlist order."
-                ) {
-                    Toggle("Track numbers in filenames", isOn: $trackNumberPrefix)
-                        .toggleStyle(.checkbox)
-                }
-
-                SettingHelpRow(
-                    title: "Closest-match fallback",
-                    help: "Off rejects uncertain matches. On may recover international tracks whose YouTube titles use another script."
-                ) {
-                    Toggle("Closest-match fallback", isOn: $allowClosestMatch)
-                        .toggleStyle(.checkbox)
-                }
-
-                SettingHelpRow(
-                    title: "Lyrics",
-                    help: "Searches lyrics online and writes them to MP3, M4A, FLAC, Opus, and Ogg metadata when found."
-                ) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Search and apply lyrics", isOn: $searchLyrics)
-                            .toggleStyle(.checkbox)
-                        Toggle("Write .lrc sidecar file", isOn: $writeLRC)
-                            .toggleStyle(.checkbox)
-                            .disabled(!searchLyrics)
-                    }
-                }
-
+            Section("Artwork") {
                 SettingHelpRow(
                     title: "Artwork",
-                    help: "Downscale cover art before embedding, and optionally re-encode it as JPEG to shrink file size. Requires Pillow."
+                    help: "Downscale cover art before embedding, and optionally re-encode it as JPEG to shrink files."
                 ) {
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 6) {
                         Picker("Cover art size", selection: $artworkMaxSize) {
                             ForEach(ArtworkMaxSize.allCases) { size in
                                 Text(size.label).tag(size.rawValue)
                             }
                         }
                         Toggle("Convert cover art to JPEG", isOn: $artworkJpeg)
-                            .toggleStyle(.checkbox)
                     }
                 }
+            }
 
+            Section("Apple Music") {
                 SettingHelpRow(
                     title: "Apple Music playlist",
-                    help: "Creates a new playlist after each audio download and adds the completed MP3, M4A, or WAV files. Repeated names get a number suffix. macOS will ask for permission the first time."
+                    help: "After each audio download, creates a new playlist with the completed MP3, M4A, or WAV files. macOS asks for permission the first time."
                 ) {
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 6) {
                         Toggle("Add downloads to a new playlist", isOn: $addToAppleMusic)
-                            .toggleStyle(.checkbox)
                         TextField("Playlist name", text: $appleMusicPlaylistName)
                             .disabled(!addToAppleMusic)
                         if addToAppleMusic,
@@ -151,13 +155,70 @@ struct SettingsView: View {
                         }
                     }
                 }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
 
+private struct LyricsSettingsTab: View {
+    @AppStorage("searchLyrics") private var searchLyrics = true
+    @AppStorage("lyricsStyle") private var lyricsStyle = LyricsStyle.plain.rawValue
+    @AppStorage("writeLRCSidecar") private var writeLRCSidecar = false
+
+    private var selectedStyle: LyricsStyle {
+        LyricsStyle(rawValue: lyricsStyle) ?? .plain
+    }
+
+    var body: some View {
+        Form {
+            Section("Embedded lyrics") {
+                SettingHelpRow(
+                    title: "Lyrics",
+                    help: "Looks up lyrics on LRCLib and writes them inside each song (MP3, M4A, FLAC, Opus, Ogg)."
+                ) {
+                    Toggle("Embed lyrics in songs", isOn: $searchLyrics)
+                }
+
+                SettingHelpRow(title: "Lyrics style", help: selectedStyle.help) {
+                    Picker("Style", selection: $lyricsStyle) {
+                        ForEach(LyricsStyle.allCases) { style in
+                            Text(style.label).tag(style.rawValue)
+                        }
+                    }
+                    .pickerStyle(.radioGroup)
+                    .disabled(!searchLyrics)
+                }
             }
 
-            Section("Network") {
+            Section("Sidecar files") {
+                SettingHelpRow(
+                    title: ".lrc sidecar",
+                    help: "Off by default: lyrics already live inside the song. Turn on only if a player needs separate .lrc files."
+                ) {
+                    Toggle("Also save a .lrc file next to each song", isOn: $writeLRCSidecar)
+                        .disabled(!searchLyrics)
+                }
+
+                Text("Already have .lrc files? Use Library Tools > Embed .lrc Lyrics to move them into your songs.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+private struct YouTubeSettingsTab: View {
+    @AppStorage("cookiesBrowser") private var cookiesBrowser = CookiesBrowser.none.rawValue
+    @AppStorage("allowClosestMatch") private var allowClosestMatch = false
+
+    var body: some View {
+        Form {
+            Section("Access") {
                 SettingHelpRow(
                     title: "Browser cookies",
-                    help: "Load cookies from a browser so yt-dlp can avoid bot-detection. Choose the browser you are signed into YouTube with."
+                    help: "Fixes \"Sign in to confirm you're not a bot\". Choose the browser where you're signed in to YouTube."
                 ) {
                     Picker("Cookies from browser", selection: $cookiesBrowser) {
                         ForEach(CookiesBrowser.allCases) { browser in
@@ -165,23 +226,37 @@ struct SettingsView: View {
                         }
                     }
                 }
+
+                Text("HTTP 403 errors usually mean yt-dlp has no JavaScript runtime. Install one with `brew install deno`, then check Diagnostics.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            Section("Diagnostics") {
+            Section("Matching") {
                 SettingHelpRow(
-                    title: "Detailed activity",
-                    help: "Shows the helper transcript in the main window below the progress bars."
+                    title: "Closest-match fallback",
+                    help: "Off rejects uncertain matches. On may recover international tracks whose YouTube titles use another script."
                 ) {
-                    Toggle("Show detailed activity", isOn: $showDetailedActivity)
-                        .toggleStyle(.checkbox)
+                    Toggle("Closest-match fallback", isOn: $allowClosestMatch)
                 }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
 
+private struct AdvancedSettingsTab: View {
+    @AppStorage("debugLogging") private var debugLogging = false
+
+    var body: some View {
+        Form {
+            Section("Diagnostics") {
                 SettingHelpRow(
                     title: "Debug logs",
                     help: "Adds detailed YouTube and per-track decisions to the rotating log for troubleshooting."
                 ) {
                     Toggle("Debug logs", isOn: $debugLogging)
-                        .toggleStyle(.checkbox)
                 }
 
                 Button("Open Logs Folder") {
@@ -191,8 +266,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .padding()
-        .frame(width: 520)
     }
 }
 

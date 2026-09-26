@@ -12,7 +12,8 @@ struct DownloadComposerView: View {
     @AppStorage("trackNumberPrefix") private var trackNumberPrefix = true
     @AppStorage("allowClosestMatch") private var allowClosestMatch = false
     @AppStorage("searchLyrics") private var searchLyrics = true
-    @AppStorage("writeLRC") private var writeLRC = true
+    @AppStorage("lyricsStyle") private var lyricsStyle = LyricsStyle.plain.rawValue
+    @AppStorage("writeLRCSidecar") private var writeLRC = false
     @AppStorage("cookiesBrowser") private var cookiesBrowser = CookiesBrowser.none.rawValue
     @AppStorage("artworkMaxSize") private var artworkMaxSize = ArtworkMaxSize.unlimited.rawValue
     @AppStorage("artworkJpeg") private var artworkJpeg = false
@@ -32,6 +33,10 @@ struct DownloadComposerView: View {
 
     private var selectedArtworkMaxSize: ArtworkMaxSize {
         ArtworkMaxSize(rawValue: artworkMaxSize) ?? .unlimited
+    }
+
+    private var selectedLyricsStyle: LyricsStyle {
+        LyricsStyle(rawValue: lyricsStyle) ?? .plain
     }
 
     private var selectedFormat: AudioFormat {
@@ -153,6 +158,7 @@ struct DownloadComposerView: View {
                     trackNumberPrefix: trackNumberPrefix,
                     allowClosestMatch: allowClosestMatch,
                     searchLyrics: searchLyrics,
+                    lyricsStyle: selectedLyricsStyle,
                     writeLRC: writeLRC,
                     cookiesBrowser: selectedCookiesBrowser,
                     artworkMaxSize: selectedArtworkMaxSize,
@@ -178,6 +184,7 @@ struct DownloadComposerView: View {
                     trackNumberPrefix: trackNumberPrefix,
                     allowClosestMatch: allowClosestMatch,
                     searchLyrics: searchLyrics,
+                    lyricsStyle: selectedLyricsStyle,
                     writeLRC: writeLRC,
                     cookiesBrowser: selectedCookiesBrowser,
                     artworkMaxSize: selectedArtworkMaxSize,

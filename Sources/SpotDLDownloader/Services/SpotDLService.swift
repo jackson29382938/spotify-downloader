@@ -68,6 +68,7 @@ final class DownloadService {
         apply: Bool,
         recursive: Bool,
         searchLyrics: Bool,
+        lyricsStyle: LyricsStyle,
         updateArtwork: Bool,
         overwriteArtwork: Bool,
         minConfidence: Double,
@@ -89,6 +90,8 @@ final class DownloadService {
         }
         if !searchLyrics {
             arguments.append("--no-lyrics")
+        } else if lyricsStyle != .plain {
+            arguments.append(contentsOf: ["--lyrics-style", lyricsStyle.rawValue])
         }
         if !updateArtwork {
             arguments.append("--no-artwork")
@@ -98,6 +101,30 @@ final class DownloadService {
         }
         if apply, let renamePattern, renamePattern.trimmingCharacters(in: .whitespaces).isEmpty == false {
             arguments.append(contentsOf: ["--rename-pattern", renamePattern])
+        }
+
+        try runStreaming(arguments: arguments, output: output, completion: completion)
+    }
+
+    func embedLRCFiles(
+        folders: [String],
+        recursive: Bool,
+        keepLRC: Bool,
+        lyricsStyle: LyricsStyle,
+        output: @escaping (String) -> Void,
+        completion: @escaping (Int32) -> Void
+    ) throws {
+        let folderPaths = folders.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+        var arguments = ProjectPaths.downloaderInvocationPrefix
+            + ["embed-lrc"]
+            + folderPaths
+            + ["--json-events", "--lyrics-style", lyricsStyle.rawValue]
+
+        if !recursive {
+            arguments.append("--no-recursive")
+        }
+        if keepLRC {
+            arguments.append("--keep-lrc")
         }
 
         try runStreaming(arguments: arguments, output: output, completion: completion)

@@ -25,7 +25,7 @@ enum DownloadStatus: Equatable {
         case .running:
             "Downloading"
         case .repairing:
-            "Repairing Library"
+            "Updating Library"
         case .succeeded:
             "Complete"
         case .failed(let code):

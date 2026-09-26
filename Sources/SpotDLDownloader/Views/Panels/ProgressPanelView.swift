@@ -2,6 +2,8 @@ import SwiftUI
 
 struct ProgressPanelView: View {
     @ObservedObject var viewModel: DownloadViewModel
+    /// On the Download page the song list grows with the window.
+    var fillsHeight = false
 
     var body: some View {
         Card {
@@ -44,9 +46,10 @@ struct ProgressPanelView: View {
                             }
                         }
                     }
-                    .frame(maxHeight: 260)
+                    .frame(maxHeight: fillsHeight ? CGFloat.infinity : 260)
                 }
             }
+            .frame(maxHeight: fillsHeight ? CGFloat.infinity : nil, alignment: .top)
         }
     }
 
