@@ -34,7 +34,7 @@ import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from logging.handlers import RotatingFileHandler
@@ -592,43 +592,27 @@ def fetch_track_by_id(spotify_id: str) -> Track:
     return track_from_entity(entity, album=fetch_track_album(spotify_id), spotify_id=spotify_id)
 
 
-def manifest_spotify_ids(output_dir: Path) -> set[str]:
-    ids: set[str] = set()
-    for item in read_manifest_entries(output_dir):
-        try:
-            key = item.get("key")
-            file_name = item.get("file", "")
-            if not isinstance(key, str) or not key.startswith("spotify:"):
-                continue
-            if (output_dir / str(file_name)).exists():
-                ids.add(key.split(":")[1])
-        except (TypeError, IndexError):
-            continue
-    return ids
-
-
 def complete_playlist_tracks(
     playlist_id: str,
     token: str,
     embed_tracks: list[Track],
-    skip_ids: set[str] | None = None,
+    cached_tracks: dict[tuple[str, int], Track] | None = None,
 ) -> list[Track]:
-    skip_ids = skip_ids or set()
+    cached_tracks = cached_tracks or {}
     try:
         ordered_ids = fetch_spclient_track_ids(playlist_id, token)
     except Exception as exc:
         LOG.info("full playlist lookup failed for %s: %s", playlist_id, exc)
         return embed_tracks
 
-    if len(ordered_ids) <= len(embed_tracks) and not skip_ids:
+    if len(ordered_ids) <= len(embed_tracks) and not cached_tracks:
         return embed_tracks
 
     tracks_by_id = {track.spotify_id: track for track in embed_tracks if track.spotify_id}
-    missing_ids = [
-        spotify_id
-        for spotify_id in ordered_ids
-        if spotify_id not in tracks_by_id and spotify_id not in skip_ids
-    ]
+    missing_ids = list(dict.fromkeys(
+        spotify_id for index, spotify_id in enumerate(ordered_ids, 1)
+        if spotify_id not in tracks_by_id and (spotify_id, index) not in cached_tracks
+    ))
     if missing_ids:
         print(
             f"Spotify playlist has {len(ordered_ids)} tracks; fetching {len(missing_ids)} more.",
@@ -650,11 +634,17 @@ def complete_playlist_tracks(
                     spotify_id=spotify_id,
                 )
 
-    ordered_tracks = [tracks_by_id[spotify_id] for spotify_id in ordered_ids if spotify_id in tracks_by_id]
+    ordered_tracks = [
+        cached_tracks.get((spotify_id, index)) or tracks_by_id.get(spotify_id)
+        for index, spotify_id in enumerate(ordered_ids, 1)
+    ]
+    ordered_tracks = [track for track in ordered_tracks if track is not None]
     return ordered_tracks or embed_tracks
 
 
-def fetch_spotify(url: str) -> SpotifyCollection:
+def fetch_spotify(
+    url: str, resume_output_root: str | None = None, resume_format: str | None = None
+) -> SpotifyCollection:
     kind, spotify_id = parse_spotify_url(url)
     entity, token = fetch_embed_page(kind, spotify_id)
     name = entity.get("title") or entity.get("name") or kind.title()
@@ -693,7 +683,10 @@ def fetch_spotify(url: str) -> SpotifyCollection:
         raise ValueError(f"No playable tracks found in Spotify {kind}: {name}")
 
     if kind == "playlist" and token:
-        tracks = complete_playlist_tracks(spotify_id, token, tracks)
+        cached = {}
+        if resume_output_root and resume_format:
+            cached = load_manifest_tracks(Path(resume_output_root).expanduser() / safe(name), resume_format)
+        tracks = complete_playlist_tracks(spotify_id, token, tracks, cached_tracks=cached)
 
     return SpotifyCollection(
         name=name,
@@ -1134,8 +1127,32 @@ def load_manifest(output_dir: Path) -> dict[str, Path]:
     return completed
 
 
-def append_manifest(output_dir: Path, key: str, path: Path) -> None:
+def load_manifest_tracks(output_dir: Path, fmt: str) -> dict[tuple[str, int], Track]:
+    tracks: dict[tuple[str, int], Track] = {}
+    for item in read_manifest_entries(output_dir):
+        key = item.get("key")
+        file_name = item.get("file")
+        metadata = item.get("track")
+        if not isinstance(key, str) or not isinstance(file_name, str) or not isinstance(metadata, dict):
+            continue
+        match = re.fullmatch(r"spotify:([A-Za-z0-9]+):(\d+)", key)
+        if not match or not (output_dir / file_name).is_file() or Path(file_name).suffix.lower() != f".{fmt}":
+            continue
+        name, artists = metadata.get("name"), metadata.get("artists")
+        if not isinstance(name, str) or not isinstance(artists, str):
+            continue
+        tracks[(match.group(1), int(match.group(2)))] = Track(
+            name=name, artists=artists, spotify_id=match.group(1),
+            duration_ms=metadata.get("duration_ms"),
+            cover_url=metadata.get("cover_url"), album=metadata.get("album"),
+        )
+    return tracks
+
+
+def append_manifest(output_dir: Path, key: str, path: Path, track: Track | None = None) -> None:
     entry = {"key": key, "file": path.name}
+    if track is not None:
+        entry["track"] = asdict(track)
     with MANIFEST_LOCK:
         with (output_dir / MANIFEST_FILENAME).open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -1683,13 +1700,13 @@ def download_track(
 
     existing = existing_output(output_dir, stem, options.fmt)
     if existing and options.overwrite == "skip":
-        append_manifest(output_dir, key, existing)
+        append_manifest(output_dir, key, existing, track)
         return DownloadResult(True, label, f"skip exists: {existing.name}", str(existing), True)
     if existing and options.overwrite == "metadata":
         working = enriched_track(track, fallback_cover_url)
         lyrics = apply_track_lyrics(existing, working, options)
         tag(existing, working, pos, lyrics, options.artwork_max_size, options.artwork_jpeg)
-        append_manifest(output_dir, key, existing)
+        append_manifest(output_dir, key, existing, working)
         return DownloadResult(True, label, f"metadata refreshed: {existing.name}", str(existing), True)
     working_track = enriched_track(track, fallback_cover_url)
     queries = youtube_search_queries(working_track)
@@ -1780,7 +1797,7 @@ def download_track(
                 else:
                     original_lrc.unlink(missing_ok=True)
                 final = existing
-            append_manifest(output_dir, key, final)
+            append_manifest(output_dir, key, final, working_track)
             detail = final.name if attempt == 0 else f"{final.name} via {method}"
             release_output_stem(output_dir, reserved_stem, options.fmt)
             return DownloadResult(True, label, detail, str(final), created_this_run=existing is None)
@@ -2662,7 +2679,11 @@ def run_download(args: argparse.Namespace) -> int:
 
             print(f"Fetching Spotify metadata: {url}", flush=True)
             try:
-                collection = fetch_spotify(url)
+                collection = fetch_spotify(
+                    url,
+                    resume_output_root=args.output_dir if options.overwrite == "skip" else None,
+                    resume_format=options.fmt if options.overwrite == "skip" else None,
+                )
             except Exception as exc:
                 print(f"Failed to fetch Spotify metadata: {exc}", file=sys.stderr, flush=True)
                 total_failures += 1

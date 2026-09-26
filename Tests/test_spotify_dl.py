@@ -287,21 +287,21 @@ class ResumeMetadataTests(unittest.TestCase):
             )
             self.assertEqual(dl.load_manifest(folder)["spotify:done:1"], folder / "done.mp3")
 
-    def test_manifest_spotify_ids_only_returns_existing_files(self):
+    def test_cached_manifest_tracks_only_returns_existing_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
             (folder / "done.mp3").write_bytes(b"x")
             (folder / dl.MANIFEST_FILENAME).write_text(
                 "\n".join(
                     [
-                        json.dumps({"key": "spotify:done", "file": "done.mp3"}),
-                        json.dumps({"key": "spotify:missing", "file": "missing.mp3"}),
+                        json.dumps({"key": "spotify:done:1", "file": "done.mp3", "track": {"name": "Done", "artists": "Artist"}}),
+                        json.dumps({"key": "spotify:missing:2", "file": "missing.mp3", "track": {"name": "Missing", "artists": "Artist"}}),
                     ]
                 ),
                 encoding="utf-8",
             )
 
-            self.assertEqual(dl.manifest_spotify_ids(folder), {"done"})
+            self.assertEqual(list(dl.load_manifest_tracks(folder, "mp3")), [("done", 1)])
 
     def test_complete_playlist_tracks_skips_metadata_for_manifested_ids(self):
         fetched: list[str] = []
@@ -318,11 +318,34 @@ class ResumeMetadataTests(unittest.TestCase):
                 "playlist",
                 "token",
                 [dl.Track(name="Track id1", artists="Artist", spotify_id="id1")],
-                skip_ids={"id2"},
+                cached_tracks={("id2", 2): dl.Track(name="Track id2", artists="Artist", spotify_id="id2")},
             )
 
         self.assertEqual(fetched, ["id3"])
-        self.assertEqual([track.spotify_id for track in tracks], ["id1", "id3"])
+        self.assertEqual([track.spotify_id for track in tracks], ["id1", "id2", "id3"])
+
+    def test_fetch_spotify_uses_completed_track_metadata_from_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "Playlist"
+            folder.mkdir()
+            (folder / "02. Done - Artist.mp3").write_bytes(b"audio")
+            (folder / dl.MANIFEST_FILENAME).write_text(json.dumps({
+                "key": "spotify:done:2",
+                "file": "02. Done - Artist.mp3",
+                "track": {"name": "Done", "artists": "Artist", "spotify_id": "done"},
+            }) + "\n", encoding="utf-8")
+            entity = {"title": "Playlist", "trackList": [
+                {"title": "First", "artists": [{"name": "Artist"}], "uri": "spotify:track:first"},
+            ]}
+            with (
+                patch.object(dl, "fetch_embed_page", return_value=(entity, "token")),
+                patch.object(dl, "fetch_spclient_track_ids", return_value=["first", "done"]),
+                patch.object(dl, "fetch_track_by_id") as fetch,
+            ):
+                collection = dl.fetch_spotify("https://open.spotify.com/playlist/abc", resume_output_root=tmp, resume_format="mp3")
+
+            fetch.assert_not_called()
+            self.assertEqual([track.name for track in collection.tracks], ["First", "Done"])
 
 
 class TieredSearchTests(unittest.TestCase):
