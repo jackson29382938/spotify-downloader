@@ -17,7 +17,13 @@ final class DownloadViewModel: ObservableObject {
 
     @Published var linkText: String = Defaults.testTrackURL
     @Published var status: DownloadStatus = .idle
-    @Published var logText: String = ""
+    /// Activity lines, newest first, capped so long runs stay responsive.
+    @Published private(set) var activityLines: [String] = []
+
+    /// The activity log in reading order (oldest first), for copying.
+    var logText: String {
+        activityLines.reversed().joined(separator: "\n")
+    }
     @Published var lastCommand: String = ""
     @Published var errorMessage: String?
     @Published var queueItems: [DownloadQueueItem] = []
@@ -43,6 +49,12 @@ final class DownloadViewModel: ObservableObject {
     private var activeOutputFolder = ""
     private var previewedQueries: [String] = []
     private var outputLineBuffer = ""
+    private var pendingOutputLines: [String] = []
+    private var outputFlushScheduled = false
+
+    private static let outputFlushInterval: TimeInterval = 0.15
+    private static let maxActivityLines = 1_500
+    private static let eventDecoder = JSONDecoder()
 
     var isDownloadRunning: Bool {
         if case .running = status { return true }
@@ -206,7 +218,12 @@ final class DownloadViewModel: ObservableObject {
             previewedQueries = parsedQueries
         }
 
-        FileManager.default.createDirectoryIfNeeded(atPath: outputFolder)
+        do {
+            try FileManager.default.createDirectoryIfNeeded(atPath: outputFolder)
+        } catch {
+            errorMessage = "Could not use the download folder \(outputFolder): \(error.localizedDescription) Choose another folder in the sidebar."
+            return
+        }
 
         let command = DownloadCommand(
             queries: queries,
@@ -232,11 +249,11 @@ final class DownloadViewModel: ObservableObject {
         downloadStopAction = .none
         activeDownloadURLs = Set(queries)
         activeOutputFolder = URL(fileURLWithPath: outputFolder).standardizedFileURL.path
-        outputLineBuffer = ""
+        resetOutputState()
         errorMessage = nil
         appleMusicMessage = nil
         appleMusicMessageIsError = false
-        logText = ""
+        activityLines.removeAll()
         progressSource = .download
         progressItems = []
         progressSummary = DownloadProgressSummary(title: "Starting", total: queries.count)
@@ -362,16 +379,24 @@ final class DownloadViewModel: ObservableObject {
         appleMusicMessageIsError = false
         isAddingToAppleMusic = true
 
-        appleMusicService.addToNewPlaylist(filePaths: paths, playlistBaseName: playlistBaseName) { [weak self] result in
+        appleMusicService.addToPlaylist(filePaths: paths, playlistName: playlistBaseName) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.isAddingToAppleMusic = false
                 switch result {
                 case .success(let importResult):
+                    AppleMusicPlaylistChecker.shared.remember(importResult.playlistName)
+                    let tracks = "track\(importResult.addedCount == 1 ? "" : "s")"
+                    let target = importResult.reusedExistingPlaylist
+                        ? "your existing playlist “\(importResult.playlistName)”"
+                        : "new playlist “\(importResult.playlistName)”"
+                    let presentText = importResult.alreadyPresentCount > 0
+                        ? " · \(importResult.alreadyPresentCount) already there"
+                        : ""
                     let failureText = importResult.failedCount > 0
                         ? " · \(importResult.failedCount) could not be added"
                         : ""
-                    self.appleMusicMessage = "Added \(importResult.addedCount) track\(importResult.addedCount == 1 ? "" : "s") to “\(importResult.playlistName)”\(failureText)."
+                    self.appleMusicMessage = "Added \(importResult.addedCount) \(tracks) to \(target)\(presentText)\(failureText)."
                     self.appleMusicMessageIsError = importResult.failedCount > 0
                 case .failure(let error):
                     self.appleMusicMessage = error.localizedDescription
@@ -399,9 +424,9 @@ final class DownloadViewModel: ObservableObject {
         }
 
         cancelledByUser = false
-        outputLineBuffer = ""
+        resetOutputState()
         errorMessage = nil
-        logText = ""
+        activityLines.removeAll()
         progressSource = .library
         progressItems = []
         progressSummary = DownloadProgressSummary(title: apply ? "Applying Library Cleanup" : "Scanning Library")
@@ -460,9 +485,9 @@ final class DownloadViewModel: ObservableObject {
         }
 
         cancelledByUser = false
-        outputLineBuffer = ""
+        resetOutputState()
         errorMessage = nil
-        logText = ""
+        activityLines.removeAll()
         progressSource = .library
         progressItems = []
         progressSummary = DownloadProgressSummary(title: "Embedding Lyrics")
@@ -576,7 +601,12 @@ final class DownloadViewModel: ObservableObject {
     }
 
     func loadHistory() {
-        historyEntries = service.downloadHistory()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let entries = DownloadService.downloadHistory()
+            DispatchQueue.main.async {
+                self?.historyEntries = entries
+            }
+        }
     }
 
     func clearHistory() {
@@ -625,7 +655,7 @@ final class DownloadViewModel: ObservableObject {
     }
 
     func clearLog() {
-        logText = ""
+        activityLines.removeAll()
     }
 
     func removeQueueItem(_ item: DownloadQueueItem) {
@@ -643,7 +673,12 @@ final class DownloadViewModel: ObservableObject {
     }
 
     func openFolder(path: String) {
-        FileManager.default.createDirectoryIfNeeded(atPath: path)
+        do {
+            try FileManager.default.createDirectoryIfNeeded(atPath: path)
+        } catch {
+            errorMessage = "Could not open \(path): \(error.localizedDescription)"
+            return
+        }
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 
@@ -692,72 +727,112 @@ final class DownloadViewModel: ObservableObject {
     private func processOutput(_ text: String) {
         outputLineBuffer += text
         while let newlineRange = outputLineBuffer.range(of: "\n") {
-            let line = String(outputLineBuffer[..<newlineRange.lowerBound])
+            pendingOutputLines.append(String(outputLineBuffer[..<newlineRange.lowerBound]))
             outputLineBuffer.removeSubrange(outputLineBuffer.startIndex...newlineRange.lowerBound)
-            processOutputLine(line)
+        }
+        guard outputFlushScheduled == false, pendingOutputLines.isEmpty == false else { return }
+        outputFlushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.outputFlushInterval) { [weak self] in
+            self?.drainPendingOutput()
         }
     }
 
     private func flushOutputBuffer() {
-        guard outputLineBuffer.isEmpty == false else { return }
-        processOutputLine(outputLineBuffer)
-        outputLineBuffer = ""
+        if outputLineBuffer.isEmpty == false {
+            pendingOutputLines.append(outputLineBuffer)
+            outputLineBuffer = ""
+        }
+        drainPendingOutput()
     }
 
-    private func processOutputLine(_ line: String) {
-        if let event = decodeProgressEvent(from: line) {
-            applyProgressEvent(event)
-            return
+    private func resetOutputState() {
+        outputLineBuffer = ""
+        pendingOutputLines.removeAll()
+    }
+
+    /// Applies every buffered helper line in one pass. The helper can print
+    /// thousands of lines for a big playlist; publishing once per batch keeps
+    /// SwiftUI from redrawing the whole window for each line.
+    private func drainPendingOutput() {
+        outputFlushScheduled = false
+        guard pendingOutputLines.isEmpty == false else { return }
+        let lines = pendingOutputLines
+        pendingOutputLines.removeAll(keepingCapacity: true)
+
+        var items = progressItems
+        var summary = progressSummary
+        var indexByID = Dictionary(items.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var itemsChanged = false
+        var needsSort = false
+        var logLines: [String] = []
+
+        for line in lines {
+            guard let event = decodeProgressEvent(from: line) else {
+                logLines.append(line)
+                continue
+            }
+            switch event.event {
+            case "collection_start":
+                summary = DownloadProgressSummary(
+                    title: event.title ?? "Downloading",
+                    total: event.selectedCount ?? event.trackCount ?? event.total ?? summary.total
+                )
+            case "collection_finished":
+                summary.completed = event.okCount ?? summary.completed
+                summary.failed = event.failedCount ?? summary.failed
+                itemsChanged = true
+            case "track_progress":
+                if Self.upsertProgressItem(from: event, into: &items, indexByID: &indexByID) {
+                    needsSort = true
+                }
+                itemsChanged = true
+            case "source_finished":
+                if let url = event.sourceURL {
+                    let failed = event.failedCount ?? 0
+                    let warnings = event.warningCount ?? 0
+                    let message = failed > 0
+                        ? "\(failed) failed, \(event.okCount ?? 0) completed"
+                        : (warnings > 0 ? "Completed with \(warnings) metadata warning\(warnings == 1 ? "" : "s")" : "Complete")
+                    updateQueueItems(for: [url], state: failed > 0 ? .failed : .succeeded, message: message)
+                }
+            default:
+                break
+            }
         }
 
-        if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            appendLog("\n")
-        } else {
-            appendLog(line + "\n")
+        if needsSort {
+            items.sort(by: Self.progressOrder)
         }
+        if itemsChanged {
+            progressItems = items
+            progressSummary = Self.summarize(items, base: summary)
+        } else if summary != progressSummary {
+            progressSummary = summary
+        }
+        appendLogLines(logLines)
     }
 
     private func decodeProgressEvent(from line: String) -> DownloadProgressEvent? {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("{"), let data = trimmed.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(DownloadProgressEvent.self, from: data)
+        return try? Self.eventDecoder.decode(DownloadProgressEvent.self, from: data)
     }
 
-    private func applyProgressEvent(_ event: DownloadProgressEvent) {
-        switch event.event {
-        case "collection_start":
-            progressSummary = DownloadProgressSummary(
-                title: event.title ?? "Downloading",
-                total: event.selectedCount ?? event.trackCount ?? event.total ?? progressSummary.total
-            )
-        case "collection_finished":
-            progressSummary.completed = event.okCount ?? progressSummary.completed
-            progressSummary.failed = event.failedCount ?? progressSummary.failed
-            recalculateProgressSummary()
-        case "track_progress":
-            upsertProgressItem(from: event)
-        case "source_finished":
-            if let url = event.sourceURL {
-                let failed = event.failedCount ?? 0
-                let warnings = event.warningCount ?? 0
-                let message = failed > 0
-                    ? "\(failed) failed, \(event.okCount ?? 0) completed"
-                    : (warnings > 0 ? "Completed with \(warnings) metadata warning\(warnings == 1 ? "" : "s")" : "Complete")
-                updateQueueItems(for: [url], state: failed > 0 ? .failed : .succeeded, message: message)
-            }
-        default:
-            break
-        }
-    }
-
-    private func upsertProgressItem(from event: DownloadProgressEvent) {
+    /// Updates or inserts one song's row. Returns true when the order may have
+    /// changed, so the caller sorts once per batch instead of once per event.
+    private static func upsertProgressItem(
+        from event: DownloadProgressEvent,
+        into items: inout [DownloadProgressItem],
+        indexByID: inout [String: Int]
+    ) -> Bool {
         let fallbackID = event.label ?? event.title ?? UUID().uuidString
         let id = event.key?.isEmpty == false ? event.key! : fallbackID
         let state = event.state ?? .running
         let progress = max(0, min(1, event.progress ?? (state == .succeeded || state == .skipped ? 1 : 0)))
 
-        if let existingIndex = progressItems.firstIndex(where: { $0.id == id }) {
-            var item = progressItems[existingIndex]
+        if let existingIndex = indexByID[id] {
+            var item = items[existingIndex]
+            let previousIndex = item.index
             item.index = event.index ?? item.index
             item.total = event.total ?? item.total
             item.title = event.title?.isEmpty == false ? event.title! : item.title
@@ -771,56 +846,76 @@ final class DownloadViewModel: ObservableObject {
             item.path = event.path ?? item.path
             item.skipped = event.skipped ?? item.skipped
             item.createdThisRun = event.createdThisRun ?? item.createdThisRun
-            progressItems[existingIndex] = item
-        } else {
-            progressItems.append(
-                DownloadProgressItem(
-                    id: id,
-                    index: event.index,
-                    total: event.total,
-                    title: event.title ?? event.label ?? "Download",
-                    artists: event.artists ?? "",
-                    album: event.album ?? "",
-                    label: event.label ?? event.title ?? "Download",
-                    coverURL: event.coverURL ?? "",
-                    progress: progress,
-                    state: state,
-                    message: event.message ?? state.label,
-                    path: event.path,
-                    skipped: event.skipped ?? false,
-                    createdThisRun: event.createdThisRun ?? false
-                )
-            )
+            items[existingIndex] = item
+            return item.index != previousIndex
         }
 
-        progressItems.sort { left, right in
-            switch (left.index, right.index) {
-            case let (.some(lhs), .some(rhs)):
-                return lhs == rhs ? left.displayTitle < right.displayTitle : lhs < rhs
-            case (.some, .none):
-                return true
-            case (.none, .some):
-                return false
-            case (.none, .none):
-                return left.displayTitle < right.displayTitle
-            }
+        items.append(
+            DownloadProgressItem(
+                id: id,
+                index: event.index,
+                total: event.total,
+                title: event.title ?? event.label ?? "Download",
+                artists: event.artists ?? "",
+                album: event.album ?? "",
+                label: event.label ?? event.title ?? "Download",
+                coverURL: event.coverURL ?? "",
+                progress: progress,
+                state: state,
+                message: event.message ?? state.label,
+                path: event.path,
+                skipped: event.skipped ?? false,
+                createdThisRun: event.createdThisRun ?? false
+            )
+        )
+        indexByID[id] = items.count - 1
+        return true
+    }
+
+    private static func progressOrder(_ left: DownloadProgressItem, _ right: DownloadProgressItem) -> Bool {
+        switch (left.index, right.index) {
+        case let (.some(lhs), .some(rhs)):
+            return lhs == rhs ? left.displayTitle < right.displayTitle : lhs < rhs
+        case (.some, .none):
+            return true
+        case (.none, .some):
+            return false
+        case (.none, .none):
+            return left.displayTitle < right.displayTitle
         }
-        recalculateProgressSummary()
+    }
+
+    private static func summarize(_ items: [DownloadProgressItem], base: DownloadProgressSummary) -> DownloadProgressSummary {
+        var summary = base
+        var completed = 0
+        var failed = 0
+        var skipped = 0
+        var progressSum = 0.0
+        for item in items {
+            switch item.state {
+            case .succeeded:
+                completed += 1
+            case .failed, .cancelled:
+                failed += 1
+            case .skipped:
+                skipped += 1
+            default:
+                break
+            }
+            progressSum += item.progress
+        }
+        let total = max(base.total, items.count)
+        summary.completed = completed
+        summary.failed = failed
+        summary.skipped = skipped
+        summary.total = total
+        let progress = total > 0 ? min(1, progressSum / Double(total)) : 0
+        summary.progress = summary.finished >= total && total > 0 ? 1 : progress
+        return summary
     }
 
     private func recalculateProgressSummary() {
-        let completed = progressItems.filter { $0.state == .succeeded }.count
-        let failed = progressItems.filter { $0.state == .failed || $0.state == .cancelled }.count
-        let skipped = progressItems.filter { $0.state == .skipped }.count
-        let total = max(progressSummary.total, progressItems.count)
-        let averageProgress = progressItems.reduce(0) { $0 + $1.progress }
-        let progress = total > 0 ? min(1, averageProgress / Double(total)) : 0
-
-        progressSummary.completed = completed
-        progressSummary.failed = failed
-        progressSummary.skipped = skipped
-        progressSummary.total = total
-        progressSummary.progress = progressSummary.finished >= total && total > 0 ? 1 : progress
+        progressSummary = Self.summarize(progressItems, base: progressSummary)
     }
 
     private func finishRunningProgressItems(as state: ProgressItemState, message: String) {
@@ -837,7 +932,20 @@ final class DownloadViewModel: ObservableObject {
     }
 
     private func appendLog(_ text: String) {
-        logText += text
+        appendLogLines(text.components(separatedBy: "\n"))
+    }
+
+    /// Adds lines newest-first and drops the oldest past the cap. The full log
+    /// stays on disk in ~/Library/Logs/Spotify Downloader.
+    private func appendLogLines(_ lines: [String]) {
+        let meaningful = lines.filter { $0.trimmingCharacters(in: .whitespaces).isEmpty == false }
+        guard meaningful.isEmpty == false else { return }
+        var updated = activityLines
+        updated.insert(contentsOf: meaningful.reversed(), at: 0)
+        if updated.count > Self.maxActivityLines {
+            updated.removeLast(updated.count - Self.maxActivityLines)
+        }
+        activityLines = updated
     }
 
     private func updateQueueItems(for urls: Set<String>, state: QueueItemState, message: String) {

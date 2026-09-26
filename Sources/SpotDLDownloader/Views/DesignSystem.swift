@@ -1,3 +1,4 @@
+import ImageIO
 import SwiftUI
 
 /// Shared visual tokens so every panel uses the same rhythm, radius, and materials.
@@ -106,23 +107,19 @@ struct StatusBadge: View {
     }
 }
 
-/// Square artwork thumbnail with a graceful placeholder.
+/// Square artwork thumbnail with a graceful placeholder. Images come from a
+/// shared cache so scrolling long playlists does not refetch or re-decode art.
 struct CoverView: View {
     let urlString: String
 
+    @State private var image: NSImage?
+
     var body: some View {
         Group {
-            if let url = URL(string: urlString), urlString.isEmpty == false {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    default:
-                        placeholder
-                    }
-                }
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
             } else {
                 placeholder
             }
@@ -131,6 +128,12 @@ struct CoverView: View {
         .overlay {
             RoundedRectangle(cornerRadius: Theme.innerRadius)
                 .stroke(.separator.opacity(0.6))
+        }
+        .task(id: urlString) {
+            image = CoverImageCache.shared.cachedImage(for: urlString)
+            if image == nil {
+                image = await CoverImageCache.shared.image(for: urlString)
+            }
         }
     }
 
@@ -141,6 +144,62 @@ struct CoverView: View {
             Image(systemName: "music.note")
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+/// Downloads cover art once, downsamples it to thumbnail size off the main
+/// thread, and keeps the result in memory.
+@MainActor
+final class CoverImageCache {
+    static let shared = CoverImageCache()
+
+    private let cache = NSCache<NSString, NSImage>()
+    private var inFlight: [String: Task<CGImage?, Never>] = [:]
+
+    private init() {
+        cache.countLimit = 600
+    }
+
+    func cachedImage(for urlString: String) -> NSImage? {
+        cache.object(forKey: urlString as NSString)
+    }
+
+    func image(for urlString: String) async -> NSImage? {
+        guard urlString.isEmpty == false, let url = URL(string: urlString) else { return nil }
+        if let cached = cachedImage(for: urlString) {
+            return cached
+        }
+        let task: Task<CGImage?, Never>
+        if let existing = inFlight[urlString] {
+            task = existing
+        } else {
+            task = Task.detached(priority: .utility) { () -> CGImage? in
+                guard let (data, _) = try? await URLSession.shared.data(from: url) else { return nil }
+                return CoverImageCache.thumbnail(from: data)
+            }
+            inFlight[urlString] = task
+        }
+        guard let cgImage = await task.value else {
+            inFlight[urlString] = nil
+            return nil
+        }
+        inFlight[urlString] = nil
+        if let cached = cachedImage(for: urlString) {
+            return cached
+        }
+        let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        cache.setObject(image, forKey: urlString as NSString)
+        return image
+    }
+
+    nonisolated private static func thumbnail(from data: Data) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 160,
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 }
 

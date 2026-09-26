@@ -91,7 +91,7 @@ struct ContentView: View {
                 } label: {
                     Label("Clear Log", systemImage: "trash")
                 }
-                .disabled(viewModel.logText.isEmpty)
+                .disabled(viewModel.activityLines.isEmpty)
             }
 
             Button {

@@ -32,8 +32,9 @@ full ledger and [NOTICE.md](NOTICE.md) for attribution.
   force another round of per-track Spotify lookups on the next run.
 - Preview-before-download, a native queue/detail view, retry failed items,
   diagnostics copy, helper health checks, and download history.
-- Optional automatic import of completed MP3, M4A, and WAV downloads into a
-  newly created Apple Music playlist.
+- Optional automatic import of completed MP3, M4A, and WAV downloads into an
+  Apple Music playlist. If a playlist with exactly that name exists, songs are
+  added to it (skipping ones already there) instead of creating a duplicate.
 - In-progress **Pause & Keep Completed** and **Cancel & Delete Completed**
   controls. Paused playlist downloads resume without re-downloading completed tracks.
 - Configurable failed-track retries (two additional attempts by default), with
@@ -74,6 +75,13 @@ Run it from Codex with the **Run** action, or from Terminal:
 
 ```bash
 ./script/build_and_run.sh
+```
+
+To get the latest version from GitHub, update yt-dlp, rebuild, and launch in one
+step (local uncommitted edits are stashed first so the pull can't fail):
+
+```bash
+./script/update.sh
 ```
 
 The run script creates or repairs `.venv` when needed, installs the downloader

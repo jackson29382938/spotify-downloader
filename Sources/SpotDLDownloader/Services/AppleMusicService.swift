@@ -2,8 +2,12 @@ import Foundation
 
 struct AppleMusicImportResult {
     let playlistName: String
+    /// True when songs went into a playlist that already had this exact name.
+    let reusedExistingPlaylist: Bool
     let addedCount: Int
     let failedCount: Int
+    /// Songs that were already in the existing playlist and were not added twice.
+    let alreadyPresentCount: Int
 }
 
 enum AppleMusicImportError: LocalizedError {
@@ -32,9 +36,11 @@ enum AppleMusicImportError: LocalizedError {
 final class AppleMusicService {
     private static let compatibleExtensions = Set(["mp3", "m4a", "wav"])
 
-    func addToNewPlaylist(
+    /// Adds files to the playlist with exactly this name, creating it only
+    /// when no such playlist exists yet.
+    func addToPlaylist(
         filePaths: [String],
-        playlistBaseName: String,
+        playlistName: String,
         completion: @escaping (Result<AppleMusicImportResult, AppleMusicImportError>) -> Void
     ) {
         let compatiblePaths = uniqueCompatiblePaths(from: filePaths)
@@ -43,7 +49,7 @@ final class AppleMusicService {
             return
         }
 
-        let requestedName = playlistBaseName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestedName = playlistName.trimmingCharacters(in: .whitespacesAndNewlines)
         let baseName = requestedName.isEmpty ? Defaults.appleMusicPlaylistName : requestedName
         let process = Process()
         let outputPipe = Pipe()
@@ -67,19 +73,23 @@ final class AppleMusicService {
                 return
             }
 
+            // name <tab> created|existing <tab> added <tab> failed <tab> already present
             let fields = output.components(separatedBy: "\t")
-            guard fields.count >= 3,
-                  let addedCount = Int(fields[fields.count - 2]),
-                  let failedCount = Int(fields[fields.count - 1]) else {
+            guard fields.count >= 5,
+                  let addedCount = Int(fields[fields.count - 3]),
+                  let failedCount = Int(fields[fields.count - 2]),
+                  let alreadyPresentCount = Int(fields[fields.count - 1]) else {
                 completion(.failure(.invalidResponse))
                 return
             }
             completion(
                 .success(
                     AppleMusicImportResult(
-                        playlistName: fields.dropLast(2).joined(separator: "\t"),
+                        playlistName: fields.dropLast(4).joined(separator: "\t"),
+                        reusedExistingPlaylist: fields[fields.count - 4] == "existing",
                         addedCount: addedCount,
-                        failedCount: failedCount
+                        failedCount: failedCount,
+                        alreadyPresentCount: alreadyPresentCount
                     )
                 )
             )
@@ -89,6 +99,33 @@ final class AppleMusicService {
             try process.run()
         } catch {
             completion(.failure(.launchFailed(error.localizedDescription)))
+        }
+    }
+
+    /// Names of the user's regular playlists. Returns an empty list without
+    /// launching Music when it is not already open.
+    func existingPlaylistNames(completion: @escaping ([String]) -> Void) {
+        let process = Process()
+        let outputPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", Self.playlistNamesScript]
+        process.standardOutput = outputPipe
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { process in
+            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            guard process.terminationStatus == 0 else {
+                completion([])
+                return
+            }
+            let names = String(decoding: data, as: UTF8.self)
+                .components(separatedBy: .newlines)
+                .filter { $0.isEmpty == false }
+            completion(names)
+        }
+        do {
+            try process.run()
+        } catch {
+            completion([])
         }
     }
 
@@ -106,38 +143,86 @@ final class AppleMusicService {
         }
     }
 
+    private static let playlistNamesScript = #"""
+    if application "Music" is running then
+        tell application "Music"
+            try
+                set playlistNames to name of every user playlist whose smart is false and special kind is none
+            on error
+                set playlistNames to name of every user playlist
+            end try
+        end tell
+        set AppleScript's text item delimiters to linefeed
+        return playlistNames as text
+    end if
+    return ""
+    """#
+
     private static let importScript = #"""
     on run argv
         set requestedName to item 1 of argv
         set filePaths to items 2 thru (count argv) of argv
 
         tell application "Music"
-            set playlistName to requestedName
-            set suffixNumber to 2
-            repeat while exists user playlist playlistName
-                set playlistName to requestedName & " " & suffixNumber
-                set suffixNumber to suffixNumber + 1
-            end repeat
+            -- Reuse a regular playlist with exactly this name (case-sensitive).
+            try
+                set candidates to every user playlist whose name is requestedName and smart is false and special kind is none
+            on error
+                set candidates to every user playlist whose name is requestedName
+            end try
+            set targetPlaylist to missing value
+            considering case
+                repeat with candidate in candidates
+                    if (name of candidate) is requestedName then
+                        set targetPlaylist to contents of candidate
+                        exit repeat
+                    end if
+                end repeat
+            end considering
 
-            set newPlaylist to make new user playlist with properties {name:playlistName}
+            set reusedPlaylist to targetPlaylist is not missing value
+            set existingPaths to {}
+            if reusedPlaylist then
+                try
+                    repeat with trackLocation in (get location of every file track of targetPlaylist)
+                        try
+                            set end of existingPaths to POSIX path of (contents of trackLocation)
+                        end try
+                    end repeat
+                end try
+            else
+                set targetPlaylist to make new user playlist with properties {name:requestedName}
+            end if
+
             set addedCount to 0
             set failedCount to 0
+            set presentCount to 0
             repeat with filePath in filePaths
-                try
-                    add (POSIX file (contents of filePath) as alias) to newPlaylist
-                    set addedCount to addedCount + 1
-                on error
-                    set failedCount to failedCount + 1
-                end try
+                set posixPath to contents of filePath
+                if existingPaths contains posixPath then
+                    set presentCount to presentCount + 1
+                else
+                    try
+                        add (POSIX file posixPath as alias) to targetPlaylist
+                        set addedCount to addedCount + 1
+                    on error
+                        set failedCount to failedCount + 1
+                    end try
+                end if
             end repeat
 
-            if addedCount is 0 then
-                delete newPlaylist
+            if addedCount is 0 and presentCount is 0 then
+                if not reusedPlaylist then delete targetPlaylist
                 error "Apple Music could not import any of the downloaded files."
             end if
 
+            if reusedPlaylist then
+                set playlistState to "existing"
+            else
+                set playlistState to "created"
+            end if
             activate
-            return playlistName & tab & addedCount & tab & failedCount
+            return (name of targetPlaylist) & tab & playlistState & tab & addedCount & tab & failedCount & tab & presentCount
         end tell
     end run
     """#

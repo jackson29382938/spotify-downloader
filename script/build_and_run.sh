@@ -21,12 +21,18 @@ INFO_PLIST="$APP_CONTENTS/Info.plist"
 PACKAGE_ZIP="$DIST_DIR/Spotify Downloader Portable.zip"
 PORTABLE_BUILD_DIR="$ROOT_DIR/.build/portable-downloader"
 PORTABLE_DOWNLOADER="$PORTABLE_BUILD_DIR/spotify_dl"
+PORTABLE_STAMP="$PORTABLE_BUILD_DIR/.build-inputs"
 PYTHON_BOOTSTRAP="${PYTHON_BOOTSTRAP:-python3}"
 PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 
 cd "$ROOT_DIR"
 
-pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+case "$MODE" in
+  run|--debug|debug|--logs|logs|--telemetry|telemetry|--verify|verify)
+    # Only launching needs the old copy closed; packaging leaves it running.
+    pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+    ;;
+esac
 
 ensure_python_env() {
   if [[ ! -x "$PYTHON_BIN" ]]; then
@@ -41,12 +47,24 @@ import mutagen  # noqa: F401
 import requests  # noqa: F401
 import yt_dlp  # noqa: F401
 import yt_dlp_ejs  # noqa: F401
+from importlib.metadata import version
+assert version("pyinstaller") == "6.22.3"
 PY
   then
     echo "Installing downloader packaging dependencies..."
     "$PYTHON_BIN" -m pip install --upgrade pip
-    "$PYTHON_BIN" -m pip install -r "$ROOT_DIR/requirements.txt" pyinstaller
+    "$PYTHON_BIN" -m pip install -r "$ROOT_DIR/requirements-build.txt"
   fi
+}
+
+# Fingerprint of everything that goes into the bundled helper: its source,
+# the build settings, and the exact installed package versions.
+portable_inputs_hash() {
+  {
+    cat "$ROOT_DIR/spotify_dl.py" "$ROOT_DIR/requirements.txt" "$ROOT_DIR/requirements-build.txt" \
+      "$ROOT_DIR/script/build_and_run.sh"
+    "$PYTHON_BIN" -m pip freeze --all 2>/dev/null
+  } | shasum -a 256 | cut -d' ' -f1
 }
 
 swift build
@@ -59,8 +77,8 @@ if [[ ! -f "$APP_ICON" || "$ROOT_DIR/script/generate_app_icon.py" -nt "$APP_ICON
   "$PYTHON_BIN" "$ROOT_DIR/script/generate_app_icon.py"
 fi
 
-if [[ ! -x "$PORTABLE_DOWNLOADER" || "$ROOT_DIR/spotify_dl.py" -nt "$PORTABLE_DOWNLOADER" || "$ROOT_DIR/requirements.txt" -nt "$PORTABLE_DOWNLOADER" ]]; then
-  ensure_python_env
+INPUTS_HASH="$(portable_inputs_hash)"
+if [[ ! -x "$PORTABLE_DOWNLOADER" || "$(cat "$PORTABLE_STAMP" 2>/dev/null)" != "$INPUTS_HASH" ]]; then
   echo "Packaging standalone downloader..."
   rm -rf "$PORTABLE_BUILD_DIR"
   mkdir -p "$PORTABLE_BUILD_DIR"
@@ -75,6 +93,7 @@ if [[ ! -x "$PORTABLE_DOWNLOADER" || "$ROOT_DIR/spotify_dl.py" -nt "$PORTABLE_DO
     --collect-all yt_dlp_ejs \
     "$ROOT_DIR/spotify_dl.py"
   chmod +x "$PORTABLE_DOWNLOADER"
+  echo "$INPUTS_HASH" >"$PORTABLE_STAMP"
 else
   echo "Using cached standalone downloader."
 fi

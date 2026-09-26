@@ -363,15 +363,27 @@ def append_history(record: dict[str, object]) -> None:
 # ---------------------------------------------------------------------------
 
 
+SPOTIFY_URL_TAIL_RE = re.compile(r"(?:[/?#]\S*)?")
+
+
+def spotify_match(url: str) -> re.Match[str] | None:
+    """Match only input that is itself a Spotify link, not text that contains one."""
+    text = url.strip()
+    match = SPOTIFY_RE.match(text)
+    if not match or not SPOTIFY_URL_TAIL_RE.fullmatch(text[match.end():]):
+        return None
+    return match
+
+
 def parse_spotify_url(url: str) -> tuple[str, str]:
-    match = SPOTIFY_RE.search(url)
+    match = spotify_match(url)
     if not match:
         raise ValueError(f"not a supported Spotify track, playlist, or album URL: {url}")
     return (match.group("kind") or match.group("uri_kind")), match.group("id")
 
 
 def is_spotify_url(url: str) -> bool:
-    return SPOTIFY_RE.search(url) is not None
+    return spotify_match(url) is not None
 
 
 def is_youtube_url(url: str) -> bool:

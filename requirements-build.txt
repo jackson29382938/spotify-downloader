@@ -1,0 +1,6 @@
+# Packaging inputs for script/build_and_run.sh. The build cache is keyed on
+# the exact installed versions (pip freeze), so upgrades trigger a rebuild.
+# yt-dlp stays a minimum version in requirements.txt on purpose: YouTube
+# changes often and script/update.sh upgrades it.
+-r requirements.txt
+pyinstaller==6.22.3

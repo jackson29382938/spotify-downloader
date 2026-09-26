@@ -9,14 +9,9 @@ struct QuickOptionsView: View {
     @AppStorage("overwrite") private var overwrite = ExistingFileBehavior.skip.rawValue
     @AppStorage("searchLyrics") private var searchLyrics = true
     @AppStorage("cookiesBrowser") private var cookiesBrowser = CookiesBrowser.none.rawValue
-    @AppStorage("addToAppleMusic") private var addToAppleMusic = false
 
     private var selectedMediaKind: MediaKind {
         MediaKind(rawValue: mediaKind) ?? .audio
-    }
-
-    private var selectedAudioFormat: AudioFormat {
-        AudioFormat(rawValue: audioFormat) ?? .mp3
     }
 
     private var overwriteOptions: [ExistingFileBehavior] {
@@ -75,6 +70,8 @@ struct QuickOptionsView: View {
                             .toggleStyle(.checkbox)
                             .fixedSize()
                             .help("Embed lyrics inside each song. Style and .lrc options are in Settings > Lyrics.")
+
+                        AppleMusicPlaylistField()
                     }
 
                     SettingsLink {
@@ -95,11 +92,6 @@ struct QuickOptionsView: View {
             Label("Using \(cookies.label) cookies for YouTube", systemImage: "lock.shield")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-        }
-        if selectedMediaKind == .audio, addToAppleMusic, !selectedAudioFormat.canImportIntoAppleMusic {
-            Label("Apple Music import requires MP3, M4A, or WAV.", systemImage: "exclamationmark.triangle.fill")
-                .font(.caption)
-                .foregroundStyle(.orange)
         }
     }
 }

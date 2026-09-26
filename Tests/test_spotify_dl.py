@@ -18,6 +18,15 @@ class SpotifyParsingTests(unittest.TestCase):
         )
         self.assertEqual(dl.parse_spotify_url("spotify:playlist:def456"), ("playlist", "def456"))
 
+    def test_spotify_links_must_be_the_whole_input(self):
+        self.assertTrue(dl.is_spotify_url("  https://open.spotify.com/track/abc123?si=xyz  "))
+        self.assertTrue(dl.is_spotify_url("https://open.spotify.com/track/abc123/"))
+        self.assertFalse(dl.is_spotify_url("see https://open.spotify.com/track/abc123"))
+        self.assertFalse(dl.is_spotify_url("https://open.spotify.com/track/abc123 extra words"))
+        self.assertFalse(dl.is_spotify_url("https://evil.example/?next=https://open.spotify.com/track/abc123"))
+        with self.assertRaises(ValueError):
+            dl.parse_spotify_url("prefix spotify:album:abc123")
+
     def test_extract_spotify_entity_accepts_alternate_page_props_path(self):
         data = {"props": {"pageProps": {"data": {"entity": {"name": "Alternate"}}}}}
         self.assertEqual(dl.extract_spotify_entity(data)["name"], "Alternate")

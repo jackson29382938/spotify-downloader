@@ -138,14 +138,16 @@ final class DownloadService {
         try runStreaming(arguments: arguments, output: output, completion: completion)
     }
 
-    func downloadHistory() -> [HistoryEntry] {
+    /// The most recent `limit` sessions, newest first. Safe to call off the main thread.
+    static func downloadHistory(limit: Int = 500) -> [HistoryEntry] {
         let path = Defaults.historyPath
         guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else {
             return []
         }
         let decoder = JSONDecoder()
         var entries: [HistoryEntry] = []
-        for line in contents.components(separatedBy: .newlines) {
+        let recentLines = contents.split(whereSeparator: \.isNewline).suffix(limit)
+        for line in recentLines {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard trimmed.isEmpty == false, let data = trimmed.data(using: .utf8) else { continue }
             if let entry = try? decoder.decode(HistoryEntry.self, from: data) {

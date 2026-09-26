@@ -38,7 +38,8 @@ struct PreviewItem: Decodable {
 
 struct PreviewTrack: Decodable, Identifiable, Equatable {
     var id: String {
-        spotifyID.isEmpty ? "\(position ?? 0)-\(title)-\(artists)" : spotifyID
+        // Position keeps repeated songs in one playlist distinct.
+        "\(position ?? 0)-" + (spotifyID.isEmpty ? "\(title)-\(artists)" : spotifyID)
     }
 
     let position: Int?

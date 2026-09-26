@@ -167,13 +167,13 @@ private struct QueueDetailView: View {
 
                 Divider()
 
-                Text("Tracks")
+                Text("\(item.tracks.count) track\(item.tracks.count == 1 ? "" : "s")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 6) {
-                        ForEach(item.tracks.prefix(80)) { track in
+                        ForEach(item.tracks) { track in
                             HStack(spacing: 7) {
                                 CoverView(urlString: track.coverURL)
                                     .frame(width: 28, height: 28)
@@ -191,11 +191,6 @@ private struct QueueDetailView: View {
                                 }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        if item.tracks.count > 80 {
-                            Text("\(item.tracks.count - 80) more tracks")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
                         }
                     }
                 }

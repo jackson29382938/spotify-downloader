@@ -93,8 +93,6 @@ private struct AudioSettingsTab: View {
     @AppStorage("bitrate") private var bitrate = Bitrate.kbps192.rawValue
     @AppStorage("artworkMaxSize") private var artworkMaxSize = ArtworkMaxSize.unlimited.rawValue
     @AppStorage("artworkJpeg") private var artworkJpeg = false
-    @AppStorage("addToAppleMusic") private var addToAppleMusic = false
-    @AppStorage("appleMusicPlaylistName") private var appleMusicPlaylistName = Defaults.appleMusicPlaylistName
 
     var body: some View {
         Form {
@@ -141,19 +139,9 @@ private struct AudioSettingsTab: View {
             Section("Apple Music") {
                 SettingHelpRow(
                     title: "Apple Music playlist",
-                    help: "After each audio download, creates a new playlist with the completed MP3, M4A, or WAV files. macOS asks for permission the first time."
+                    help: "After each audio download, adds the completed MP3, M4A, or WAV files to this playlist. If a playlist with exactly this name exists, songs go into it; otherwise it is created. macOS asks for permission the first time."
                 ) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Toggle("Add downloads to a new playlist", isOn: $addToAppleMusic)
-                        TextField("Playlist name", text: $appleMusicPlaylistName)
-                            .disabled(!addToAppleMusic)
-                        if addToAppleMusic,
-                           !(AudioFormat(rawValue: audioFormat) ?? .mp3).canImportIntoAppleMusic {
-                            Label("Choose MP3, M4A, or WAV to use Apple Music import.", systemImage: "exclamationmark.triangle.fill")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                        }
-                    }
+                    AppleMusicPlaylistField(nameFieldWidth: 240)
                 }
             }
         }
@@ -260,7 +248,7 @@ private struct AdvancedSettingsTab: View {
                 }
 
                 Button("Open Logs Folder") {
-                    FileManager.default.createDirectoryIfNeeded(atPath: Defaults.logsPath)
+                    try? FileManager.default.createDirectoryIfNeeded(atPath: Defaults.logsPath)
                     NSWorkspace.shared.open(URL(fileURLWithPath: Defaults.logsPath))
                 }
             }
