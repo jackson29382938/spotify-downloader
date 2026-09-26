@@ -17,6 +17,11 @@ let package = Package(
         .executableTarget(
             name: "SpotDLDownloader",
             path: "Sources/SpotDLDownloader"
+        ),
+        .testTarget(
+            name: "SpotDLDownloaderTests",
+            dependencies: ["SpotDLDownloader"],
+            path: "Tests/SpotDLDownloaderTests"
         )
     ]
 )
