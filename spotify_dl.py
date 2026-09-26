@@ -167,6 +167,7 @@ class DownloadResult:
     detail: str = ""
     path: str | None = None
     skipped: bool = False
+    created_this_run: bool = False
 
 
 @dataclass
@@ -1680,9 +1681,6 @@ def download_track(
         tag(existing, working, pos, lyrics, options.artwork_max_size, options.artwork_jpeg)
         append_manifest(output_dir, key, existing)
         return DownloadResult(True, label, f"metadata refreshed: {existing.name}", str(existing), True)
-    if existing and options.overwrite == "force":
-        existing.unlink(missing_ok=True)
-
     working_track = enriched_track(track, fallback_cover_url)
     queries = youtube_search_queries(working_track)
     total_attempts = max(1, options.retries + 1)
@@ -1763,10 +1761,19 @@ def download_track(
 
             lyrics = apply_track_lyrics(final, working_track, options)
             tag(final, working_track, pos, lyrics, options.artwork_max_size, options.artwork_jpeg)
+            if existing and options.overwrite == "force":
+                replacement_lrc = final.with_suffix(".lrc")
+                original_lrc = existing.with_suffix(".lrc")
+                final.replace(existing)
+                if replacement_lrc.exists():
+                    replacement_lrc.replace(original_lrc)
+                else:
+                    original_lrc.unlink(missing_ok=True)
+                final = existing
             append_manifest(output_dir, key, final)
             detail = final.name if attempt == 0 else f"{final.name} via {method}"
             release_output_stem(output_dir, reserved_stem, options.fmt)
-            return DownloadResult(True, label, detail, str(final))
+            return DownloadResult(True, label, detail, str(final), created_this_run=existing is None)
         except Exception as exc:
             error_detail = str(exc).strip()[:700]
             LOG.warning("%s download failed for %s: %s", method, label, error_detail[:300])

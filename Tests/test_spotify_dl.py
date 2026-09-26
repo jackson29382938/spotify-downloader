@@ -312,6 +312,53 @@ class ResumeMetadataTests(unittest.TestCase):
 
 
 class TieredSearchTests(unittest.TestCase):
+    def test_failed_forced_replacement_keeps_existing_audio(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = Path(tmp) / "Song - Artist.mp3"
+            original.write_bytes(b"original")
+            with patch.object(dl, "youtube_candidates_for_query", return_value=[]):
+                result = dl.download_track(
+                    dl.Track(name="Song", artists="Artist"),
+                    Path(tmp), None, 1,
+                    dl.RunOptions(overwrite="force", retries=0, lyrics=False), None, {},
+                )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(original.read_bytes(), b"original")
+
+    def test_successful_forced_replacement_reuses_original_path(self):
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.options = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def download(self, urls):
+                Path(self.options["outtmpl"].replace("%(ext)s", "mp3")).write_bytes(b"replacement")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            original = Path(tmp) / "Song - Artist.mp3"
+            original.write_bytes(b"original")
+            candidate = {"id": "video", "title": "Artist - Song", "uploader": "Artist"}
+            with (
+                patch.object(dl, "youtube_candidates_for_query", return_value=[candidate]),
+                patch.object(dl, "YoutubeDL", FakeYoutubeDL),
+                patch.object(dl, "tag"),
+            ):
+                result = dl.download_track(
+                    dl.Track(name="Song", artists="Artist"),
+                    Path(tmp), None, 1,
+                    dl.RunOptions(overwrite="force", retries=0, lyrics=False), None, {},
+                )
+
+            self.assertTrue(result.ok)
+            self.assertEqual(result.path, str(original))
+            self.assertEqual(original.read_bytes(), b"replacement")
+
     def test_ytmusic_search_is_tried_first(self):
         track = dl.Track(name="Song", artists="Artist")
         queries = dl.youtube_search_queries(track, limit=5)
