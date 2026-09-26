@@ -637,6 +637,7 @@ def complete_playlist_tracks(
     if missing_ids:
         print(
             f"Spotify playlist has {len(ordered_ids)} tracks; fetching {len(missing_ids)} more.",
+            file=sys.stderr,
             flush=True,
         )
 
@@ -1379,15 +1380,6 @@ def choose_youtube_candidate(
                         return chosen, f"title matched, artist unavailable ({diff:.0f}s off)"
             else:
                 return exact_pool[0], "title matched, artist unavailable"
-
-    title_pool = [candidate for candidate in candidates if title_ok(candidate)]
-    if title_pool and expected_duration and artist_available:
-        timed = [candidate for candidate in title_pool if candidate.get("duration")]
-        if timed:
-            chosen = min(timed, key=lambda item: abs(float(item["duration"]) - expected_duration))
-            diff = abs(float(chosen["duration"]) - expected_duration)
-            if diff <= 30:
-                return chosen, "title and duration matched"
 
     if allow_closest and expected_duration:
         timed = [candidate for candidate in candidates if candidate.get("duration")]
@@ -2246,6 +2238,8 @@ def score_library_candidate(guess: LibraryTrackGuess, candidate: LibraryMetadata
     else:
         duration_score = 0.6
     if not guess.artist:
+        if not guess.duration_ms or not candidate.duration_ms:
+            return 0.0
         return title_score * 0.8 + duration_score * 0.2
     return title_score * 0.5 + artist_score * 0.35 + duration_score * 0.15
 

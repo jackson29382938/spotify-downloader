@@ -88,6 +88,17 @@ class SpotifyParsingTests(unittest.TestCase):
 
 
 class YoutubeMatchingTests(unittest.TestCase):
+    def test_strict_match_never_borrows_artist_from_another_result(self):
+        track = dl.Track(name="Song", artists="Correct Artist", duration_ms=180_000)
+        candidates = [
+            {"id": "artist-only", "title": "Other Track", "uploader": "Correct Artist", "duration": 180},
+            {"id": "wrong-artist", "title": "Song", "uploader": "Wrong Artist", "duration": 180},
+        ]
+
+        chosen, _ = dl.choose_youtube_candidate(candidates, track, allow_closest=False)
+
+        self.assertIsNone(chosen)
+
     def test_rejects_title_match_with_wrong_artist_by_default(self):
         track = dl.Track(name="Mi Gente", artists="DJ Goja", duration_ms=115_000)
         candidates = [
@@ -200,6 +211,15 @@ class LyricsTests(unittest.TestCase):
 
 
 class LibraryRepairTests(unittest.TestCase):
+    def test_title_alone_is_not_confident_enough_to_repair_metadata(self):
+        guess = dl.LibraryTrackGuess(path=Path("Song.mp3"), title="Song", artist="")
+        candidate = dl.LibraryMetadata(title="Song", artist="Wrong Artist", source="Apple Music")
+        with (
+            patch.object(dl, "itunes_search_candidates", return_value=[candidate]),
+            patch.object(dl, "musicbrainz_search_candidates", return_value=[]),
+        ):
+            self.assertIsNone(dl.identify_library_metadata(guess))
+
     def test_filename_pairs_support_app_and_common_orders(self):
         pairs = dl.filename_title_artist_pairs(Path("01. Song Name - Artist Name.mp3"))
         self.assertEqual(pairs[0], ("Song Name", "Artist Name"))
@@ -438,6 +458,22 @@ class SidecarAndRenameTests(unittest.TestCase):
 
 
 class PreviewHealthHistoryTests(unittest.TestCase):
+    def test_large_playlist_preview_emits_only_json_on_stdout(self):
+        entity = {
+            "title": "Playlist",
+            "trackList": [{"title": "One", "artists": [{"name": "Artist"}], "uri": "spotify:track:id1"}],
+        }
+        output = io.StringIO()
+        with (
+            patch.object(dl, "fetch_embed_page", return_value=(entity, "token")),
+            patch.object(dl, "fetch_spclient_track_ids", return_value=["id1", "id2"]),
+            patch.object(dl, "fetch_track_by_id", return_value=dl.Track(name="Two", artists="Artist", spotify_id="id2")),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(dl.main(["preview", "--json", "https://open.spotify.com/playlist/abc"]), 0)
+
+        self.assertEqual(len(json.loads(output.getvalue())["items"][0]["tracks"]), 2)
+
     def test_preview_sources_returns_spotify_collection_payload(self):
         collection = dl.SpotifyCollection(
             name="Playlist",
