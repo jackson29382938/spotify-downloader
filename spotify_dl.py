@@ -166,6 +166,7 @@ class DownloadResult:
     path: str | None = None
     skipped: bool = False
     created_this_run: bool = False
+    warning: str | None = None
 
 
 @dataclass
@@ -975,9 +976,9 @@ def tag(
     lyrics: str | None = None,
     artwork_max_size: int | None = None,
     artwork_jpeg: bool = False,
-) -> None:
+) -> str | None:
     if not HAS_MUTAGEN:
-        return
+        return "metadata tagging unavailable: mutagen is not installed"
 
     try:
         suffix = path.suffix.lower()
@@ -995,6 +996,8 @@ def tag(
     except Exception as exc:
         LOG.warning("tagging failed for %s: %s", path, exc)
         print(f"  Warning: tagging failed for {path.name}: {exc}", flush=True)
+        return f"metadata tagging failed: {exc}"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1703,9 +1706,10 @@ def download_track(
     if existing and options.overwrite == "metadata":
         working = enriched_track(track, fallback_cover_url)
         lyrics = apply_track_lyrics(existing, working, options)
-        tag(existing, working, pos, lyrics, options.artwork_max_size, options.artwork_jpeg)
+        warning = tag(existing, working, pos, lyrics, options.artwork_max_size, options.artwork_jpeg)
         append_manifest(output_dir, key, existing, working)
-        return DownloadResult(True, label, f"metadata refreshed: {existing.name}", str(existing), True)
+        detail = f"metadata refreshed: {existing.name}" if not warning else f"audio kept; {warning}"
+        return DownloadResult(True, label, detail, str(existing), True, warning=warning)
     working_track = enriched_track(track, fallback_cover_url)
     queries = youtube_search_queries(working_track)
     total_attempts = max(1, options.retries + 1)
@@ -1785,7 +1789,7 @@ def download_track(
                 continue
 
             lyrics = apply_track_lyrics(final, working_track, options)
-            tag(final, working_track, pos, lyrics, options.artwork_max_size, options.artwork_jpeg)
+            warning = tag(final, working_track, pos, lyrics, options.artwork_max_size, options.artwork_jpeg)
             if existing and options.overwrite == "force":
                 replacement_lrc = final.with_suffix(".lrc")
                 original_lrc = existing.with_suffix(".lrc")
@@ -1797,8 +1801,10 @@ def download_track(
                 final = existing
             append_manifest(output_dir, key, final, working_track)
             detail = final.name if attempt == 0 else f"{final.name} via {method}"
+            if warning:
+                detail += f"; {warning}"
             release_output_stem(output_dir, reserved_stem, options.fmt)
-            return DownloadResult(True, label, detail, str(final), created_this_run=existing is None)
+            return DownloadResult(True, label, detail, str(final), created_this_run=existing is None, warning=warning)
         except Exception as exc:
             error_detail = str(exc).strip()[:700]
             LOG.warning("%s download failed for %s: %s", method, label, error_detail[:300])
@@ -1859,7 +1865,7 @@ def download_collection(
     output_root: str,
     threads: int,
     start: int,
-) -> tuple[int, int, list[str], Path]:
+) -> tuple[int, int, int, list[str], Path]:
     output_dir = Path(output_root).expanduser()
     if collection.use_subfolder:
         output_dir = output_dir / safe(collection.name)
@@ -1871,7 +1877,7 @@ def download_collection(
         if index >= start
     ]
     if not selected_tracks:
-        return 0, 0, [], output_dir
+        return 0, 0, 0, [], output_dir
 
     options.ffmpeg_location = options.ffmpeg_location or find_ffmpeg_location()
     manifest_done = load_manifest(output_dir)
@@ -1892,6 +1898,7 @@ def download_collection(
     )
 
     ok = 0
+    warnings = 0
     failed: list[str] = []
 
     def run_one(index: int, track: Track) -> tuple[int, Track, DownloadResult]:
@@ -1909,10 +1916,11 @@ def download_collection(
         return index, track, result
 
     def handle_result(index: int, track: Track, result: DownloadResult) -> None:
-        nonlocal ok
+        nonlocal ok, warnings
         pos = index if collection.use_subfolder else None
         if result.ok:
             ok += 1
+            warnings += bool(result.warning)
             state = "skipped" if result.skipped else "succeeded"
             track_progress_event(
                 options, track, pos, len(collection.tracks), state, 1.0,
@@ -1969,10 +1977,11 @@ def download_collection(
         title=collection.name,
         ok_count=ok,
         failed_count=fail_count,
+        warning_count=warnings,
         output_folder=str(output_dir),
     )
 
-    return ok, fail_count, failed, output_dir
+    return ok, fail_count, warnings, failed, output_dir
 
 
 # ---------------------------------------------------------------------------
@@ -2682,10 +2691,10 @@ def run_download(args: argparse.Namespace) -> int:
     options_output_dir.set(str(Path(args.output_dir).expanduser()))
 
     total_failures = 0
-    def finish_source(url: str, ok: int, failed: int) -> None:
+    def finish_source(url: str, ok: int, failed: int, warnings: int = 0) -> None:
         emit_json_event(
             options.json_events, "source_finished", source_url=url,
-            ok_count=ok, failed_count=failed,
+            ok_count=ok, failed_count=failed, warning_count=warnings,
         )
 
     for url_index, url in enumerate(args.urls, 1):
@@ -2715,7 +2724,7 @@ def run_download(args: argparse.Namespace) -> int:
                 continue
 
             try:
-                ok, failures, failed, output_dir = download_collection(
+                ok, failures, warnings, failed, output_dir = download_collection(
                     collection, options, args.output_dir, args.threads, args.start
                 )
             except KeyboardInterrupt:
@@ -2731,10 +2740,11 @@ def run_download(args: argparse.Namespace) -> int:
                     "output_folder": str(output_dir),
                     "ok_count": ok,
                     "failed_count": failures,
+                    "warning_count": warnings,
                     "failed": failed,
                 }
             )
-            finish_source(url, ok, failures)
+            finish_source(url, ok, failures, warnings)
             continue
 
         if is_youtube_url(url):

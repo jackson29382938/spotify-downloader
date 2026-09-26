@@ -211,6 +211,7 @@ struct DownloadProgressEvent: Decodable {
     let selectedCount: Int?
     let okCount: Int?
     let failedCount: Int?
+    let warningCount: Int?
     let outputFolder: String?
 
     enum CodingKeys: String, CodingKey {
@@ -234,6 +235,7 @@ struct DownloadProgressEvent: Decodable {
         case selectedCount = "selected_count"
         case okCount = "ok_count"
         case failedCount = "failed_count"
+        case warningCount = "warning_count"
         case outputFolder = "output_folder"
     }
 }

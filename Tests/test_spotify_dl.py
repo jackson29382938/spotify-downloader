@@ -368,7 +368,7 @@ class TieredSearchTests(unittest.TestCase):
             patch.object(dl, "wait", side_effect=measure_pending),
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            ok, failed, _, _ = dl.download_collection(collection, dl.RunOptions(), tmp, threads=4, start=1)
+            ok, failed, _, _, _ = dl.download_collection(collection, dl.RunOptions(), tmp, threads=4, start=1)
 
         self.assertEqual((ok, failed), (30, 0))
         self.assertLessEqual(peak_pending, 8)
@@ -408,7 +408,7 @@ class TieredSearchTests(unittest.TestCase):
             with (
                 patch.object(dl, "youtube_candidates_for_query", return_value=[candidate]),
                 patch.object(dl, "YoutubeDL", FakeYoutubeDL),
-                patch.object(dl, "tag"),
+                patch.object(dl, "tag", return_value="metadata tagging failed: bad tags"),
             ):
                 result = dl.download_track(
                     dl.Track(name="Song", artists="Artist"),
@@ -420,6 +420,8 @@ class TieredSearchTests(unittest.TestCase):
             self.assertEqual(result.path, str(original))
             self.assertEqual(original.read_bytes(), b"replacement")
             self.assertFalse(result.created_this_run)
+            self.assertIn("metadata tagging failed", result.detail)
+            self.assertEqual(result.warning, "metadata tagging failed: bad tags")
 
     def test_ytmusic_search_is_tried_first(self):
         track = dl.Track(name="Song", artists="Artist")
@@ -501,7 +503,7 @@ class TieredSearchTests(unittest.TestCase):
             patch.object(dl, "youtube_candidates_for_query", side_effect=[[], [candidate]]) as search,
             patch.object(dl, "YoutubeDL", FakeYoutubeDL),
             patch.object(dl, "apply_track_lyrics", return_value=None),
-            patch.object(dl, "tag"),
+            patch.object(dl, "tag", return_value=None),
         ):
             result = dl.download_track(
                 track,
@@ -564,6 +566,17 @@ class FFmpegInstallTests(unittest.TestCase):
 
 
 class SidecarAndRenameTests(unittest.TestCase):
+    def test_tagging_failure_is_returned_to_the_download_flow(self):
+        with (
+            patch.object(dl, "HAS_MUTAGEN", True),
+            patch.object(dl, "cover_bytes", return_value=None),
+            patch.object(dl, "write_mp3_tags", side_effect=ValueError("bad tags")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            warning = dl.tag(Path("Song.mp3"), dl.Track(name="Song", artists="Artist"), None)
+
+        self.assertIn("bad tags", warning)
+
     def setUp(self):
         with dl.LYRICS_CACHE_LOCK:
             dl.LYRICS_CACHE.clear()

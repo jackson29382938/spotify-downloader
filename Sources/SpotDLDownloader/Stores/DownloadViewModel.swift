@@ -668,9 +668,10 @@ final class DownloadViewModel: ObservableObject {
         case "source_finished":
             if let url = event.sourceURL {
                 let failed = event.failedCount ?? 0
+                let warnings = event.warningCount ?? 0
                 let message = failed > 0
                     ? "\(failed) failed, \(event.okCount ?? 0) completed"
-                    : "Complete"
+                    : (warnings > 0 ? "Completed with \(warnings) metadata warning\(warnings == 1 ? "" : "s")" : "Complete")
                 updateQueueItems(for: [url], state: failed > 0 ? .failed : .succeeded, message: message)
             }
         default:
