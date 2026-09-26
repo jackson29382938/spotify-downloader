@@ -593,23 +593,17 @@ def fetch_track_by_id(spotify_id: str) -> Track:
 
 
 def manifest_spotify_ids(output_dir: Path) -> set[str]:
-    manifest = output_dir / MANIFEST_FILENAME
     ids: set[str] = set()
-    if not manifest.exists():
-        return ids
-    try:
-        for line in manifest.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            item = json.loads(line)
+    for item in read_manifest_entries(output_dir):
+        try:
             key = item.get("key")
             file_name = item.get("file", "")
             if not isinstance(key, str) or not key.startswith("spotify:"):
                 continue
             if (output_dir / str(file_name)).exists():
-                ids.add(key.split(":", 1)[1])
-    except Exception as exc:
-        LOG.warning("manifest id scan failed for %s: %s", manifest, exc)
+                ids.add(key.split(":")[1])
+        except (TypeError, IndexError):
+            continue
     return ids
 
 
@@ -1101,28 +1095,42 @@ def existing_output(output_dir: Path, stem: str, fmt: str) -> Path | None:
 
 def track_key(track: Track, pos: int | None) -> str:
     if track.spotify_id:
-        return f"spotify:{track.spotify_id}"
+        return f"spotify:{track.spotify_id}:{pos}" if pos is not None else f"spotify:{track.spotify_id}"
     duration = track.duration_ms or 0
     return f"{pos or 0}:{track.artists.casefold()}:{track.name.casefold()}:{duration}"
 
 
-def load_manifest(output_dir: Path) -> dict[str, Path]:
+def read_manifest_entries(output_dir: Path) -> list[dict]:
     manifest = output_dir / MANIFEST_FILENAME
-    completed: dict[str, Path] = {}
+    entries: list[dict] = []
     if not manifest.exists():
-        return completed
-
+        return entries
     try:
-        for line in manifest.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            item = json.loads(line)
-            key = item.get("key")
-            path = output_dir / str(item.get("file", ""))
-            if key and path.exists():
-                completed[str(key)] = path
-    except Exception as exc:
+        with manifest.open(encoding="utf-8") as handle:
+            for number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                    if isinstance(item, dict):
+                        entries.append(item)
+                except json.JSONDecodeError as exc:
+                    LOG.warning("manifest line %s invalid in %s: %s", number, manifest, exc)
+    except OSError as exc:
         LOG.warning("manifest read failed for %s: %s", manifest, exc)
+    return entries
+
+
+def load_manifest(output_dir: Path) -> dict[str, Path]:
+    completed: dict[str, Path] = {}
+    for item in read_manifest_entries(output_dir):
+        key = item.get("key")
+        file_name = item.get("file")
+        if not isinstance(key, str) or not isinstance(file_name, str):
+            continue
+        path = output_dir / file_name
+        if path.is_file():
+            completed[key] = path
     return completed
 
 
@@ -1666,7 +1674,7 @@ def download_track(
     ffmpeg_location = options.ffmpeg_location
     key = track_key(track, pos)
     label = f"{track.artists} - {track.name}"
-    if key in manifest_done and options.overwrite == "skip":
+    if key in manifest_done and manifest_done[key].suffix.lower() == f".{options.fmt}" and options.overwrite == "skip":
         return DownloadResult(True, label, f"resume skip: {manifest_done[key].name}", str(manifest_done[key]), True)
 
     width = max(2, len(str(total)))

@@ -273,6 +273,20 @@ class LibraryRepairTests(unittest.TestCase):
 
 
 class ResumeMetadataTests(unittest.TestCase):
+    def test_duplicate_playlist_positions_have_distinct_manifest_keys(self):
+        track = dl.Track(name="Song", artists="Artist", spotify_id="same")
+        self.assertNotEqual(dl.track_key(track, 1), dl.track_key(track, 2))
+
+    def test_corrupt_manifest_line_does_not_hide_later_completed_tracks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "done.mp3").write_bytes(b"x")
+            (folder / dl.MANIFEST_FILENAME).write_text(
+                "not-json\n" + json.dumps({"key": "spotify:done:1", "file": "done.mp3"}) + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(dl.load_manifest(folder)["spotify:done:1"], folder / "done.mp3")
+
     def test_manifest_spotify_ids_only_returns_existing_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
