@@ -13,7 +13,7 @@ The script exposes several subcommands consumed by the native macOS app:
     preview         Emit JSON describing the tracks a download would fetch.
     health          Emit a JSON diagnostics report.
     library         Scan/repair an existing music library's metadata.
-    ffmpeg-install  Download a static ffmpeg build into Application Support.
+    ffmpeg-install  Install ffmpeg with Homebrew on macOS.
 """
 
 from __future__ import annotations
@@ -32,7 +32,6 @@ import subprocess
 import sys
 import threading
 import time
-import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -87,7 +86,6 @@ ARTWORK_SIZES = ("unlimited", "600", "1200")
 LYRICS_API = "https://lrclib.net/api/get"
 ITUNES_API = "https://itunes.apple.com/search"
 MUSICBRAINZ_API = "https://musicbrainz.org/ws/2/recording"
-EVERMEET_FFMPEG = "https://evermeet.cx/ffmpeg/getrelease/zip"
 USER_AGENT = "Mozilla/5.0"
 
 RUNNING_PROCESSES: set[subprocess.Popen[str]] = set()
@@ -2506,36 +2504,41 @@ def install_ffmpeg(json_events: bool = False) -> int:
         print("Automatic ffmpeg install is only supported on macOS.", file=sys.stderr, flush=True)
         return 1
 
-    target_dir = app_support_dir() / "bin"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / "ffmpeg"
-
-    emit_json_event(json_events, "ffmpeg_install", state="running", progress=0.0, message="Downloading ffmpeg")
-    print("Downloading static ffmpeg build...", flush=True)
-    try:
-        response = req.get(EVERMEET_FFMPEG, headers={"User-Agent": USER_AGENT}, timeout=120)
-        response.raise_for_status()
-    except Exception as exc:
-        emit_json_event(json_events, "ffmpeg_install", state="failed", progress=1.0, message=str(exc))
-        print(f"ffmpeg download failed: {exc}", file=sys.stderr, flush=True)
+    brew = shutil.which("brew")
+    if not brew:
+        message = "Homebrew is required for automatic ffmpeg installation. Install ffmpeg manually and run diagnostics again."
+        emit_json_event(json_events, "ffmpeg_install", state="failed", progress=1.0, message=message)
+        print(message, file=sys.stderr, flush=True)
         return 1
 
-    emit_json_event(json_events, "ffmpeg_install", state="running", progress=0.6, message="Extracting")
+    emit_json_event(json_events, "ffmpeg_install", state="running", progress=0.0, message="Installing ffmpeg with Homebrew")
+    print("Installing ffmpeg with Homebrew...", flush=True)
     try:
-        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
-            member = next((name for name in archive.namelist() if name.rstrip("/").endswith("ffmpeg")), None)
-            if member is None:
-                raise ValueError("ffmpeg binary not found in archive")
-            with archive.open(member) as source, target.open("wb") as dest:
-                shutil.copyfileobj(source, dest)
-        target.chmod(0o755)
+        process = subprocess.Popen(
+            [brew, "install", "ffmpeg"], stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, bufsize=1,
+        )
+        register_process(process)
+        try:
+            if process.stdout is not None:
+                for line in process.stdout:
+                    print(line.rstrip(), flush=True)
+            installed = process.wait() == 0
+        finally:
+            unregister_process(process)
     except Exception as exc:
         emit_json_event(json_events, "ffmpeg_install", state="failed", progress=1.0, message=str(exc))
-        print(f"ffmpeg extraction failed: {exc}", file=sys.stderr, flush=True)
+        print(f"ffmpeg install failed: {exc}", file=sys.stderr, flush=True)
+        return 1
+
+    target = shutil.which("ffmpeg") or find_ffmpeg_location()
+    if not installed or not target:
+        emit_json_event(json_events, "ffmpeg_install", state="failed", progress=1.0, message="Homebrew could not install ffmpeg")
+        print("Homebrew could not install ffmpeg.", file=sys.stderr, flush=True)
         return 1
 
     try:
-        result = subprocess.run([str(target), "-version"], capture_output=True, text=True, timeout=30)
+        result = subprocess.run([target, "-version"], capture_output=True, text=True, timeout=30)
         verified = result.returncode == 0
     except Exception as exc:
         verified = False
@@ -2599,7 +2602,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("doctor", help="Check yt-dlp and ffmpeg dependencies.")
 
-    ffmpeg_install = subparsers.add_parser("ffmpeg-install", help="Download a static ffmpeg build (macOS).")
+    ffmpeg_install = subparsers.add_parser("ffmpeg-install", help="Install ffmpeg with Homebrew (macOS).")
     ffmpeg_install.add_argument("--json-events", dest="json_events", action="store_true", help="Emit JSON progress events.")
 
     download = subparsers.add_parser("download", help="Download Spotify or YouTube URLs.")

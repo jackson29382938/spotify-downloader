@@ -516,7 +516,7 @@ final class DownloadViewModel: ObservableObject {
     func installFFmpeg() {
         guard !isInstallingFFmpeg else { return }
         isInstallingFFmpeg = true
-        ffmpegInstallStatus = "Downloading ffmpeg…"
+        ffmpegInstallStatus = "Installing ffmpeg with Homebrew…"
 
         do {
             try service.installFFmpeg(

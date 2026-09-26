@@ -497,6 +497,36 @@ class TieredSearchTests(unittest.TestCase):
 
 
 class FFmpegInstallTests(unittest.TestCase):
+    def test_installer_uses_homebrew_and_checks_the_result(self):
+        class FakeProcess:
+            stdout = io.StringIO("Installed ffmpeg\n")
+
+            def wait(self):
+                return 0
+
+        with (
+            patch.object(dl.sys, "platform", "darwin"),
+            patch.object(dl.shutil, "which", side_effect=lambda name: f"/opt/homebrew/bin/{name}"),
+            patch.object(dl.subprocess, "Popen", return_value=FakeProcess()) as install,
+            patch.object(dl.subprocess, "run", return_value=type("Result", (), {"returncode": 0})()) as check,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(dl.install_ffmpeg(), 0)
+
+        self.assertEqual(install.call_args.args[0], ["/opt/homebrew/bin/brew", "install", "ffmpeg"])
+        self.assertEqual(check.call_args.args[0], ["/opt/homebrew/bin/ffmpeg", "-version"])
+
+    def test_installer_refuses_unverified_download_when_homebrew_is_missing(self):
+        with (
+            patch.object(dl.sys, "platform", "darwin"),
+            patch.object(dl.shutil, "which", return_value=None),
+            patch.object(dl.req, "get") as download,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(dl.install_ffmpeg(), 1)
+        download.assert_not_called()
+
     def test_ffmpeg_install_command_exists(self):
         import argparse
 
