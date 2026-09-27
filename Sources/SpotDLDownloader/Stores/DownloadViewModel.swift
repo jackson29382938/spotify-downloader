@@ -195,7 +195,6 @@ final class DownloadViewModel: ObservableObject {
         matchFlexibility: Double,
         searchLyrics: Bool,
         lyricsStyle: LyricsStyle,
-        writeLRC: Bool,
         cookiesBrowser: CookiesBrowser,
         artworkMaxSize: ArtworkMaxSize,
         artworkJpeg: Bool,
@@ -241,7 +240,6 @@ final class DownloadViewModel: ObservableObject {
             matchFlexibility: matchFlexibility,
             searchLyrics: searchLyrics,
             lyricsStyle: lyricsStyle,
-            writeLRC: writeLRC,
             cookiesBrowser: cookiesBrowser,
             artworkMaxSize: artworkMaxSize,
             artworkJpeg: artworkJpeg,
@@ -347,7 +345,6 @@ final class DownloadViewModel: ObservableObject {
         matchFlexibility: Double,
         searchLyrics: Bool,
         lyricsStyle: LyricsStyle,
-        writeLRC: Bool,
         cookiesBrowser: CookiesBrowser,
         artworkMaxSize: ArtworkMaxSize,
         artworkJpeg: Bool,
@@ -370,7 +367,6 @@ final class DownloadViewModel: ObservableObject {
             matchFlexibility: matchFlexibility,
             searchLyrics: searchLyrics,
             lyricsStyle: lyricsStyle,
-            writeLRC: writeLRC,
             cookiesBrowser: cookiesBrowser,
             artworkMaxSize: artworkMaxSize,
             artworkJpeg: artworkJpeg,
@@ -488,7 +484,7 @@ final class DownloadViewModel: ObservableObject {
     }
 
     /// Moves lyrics from `.lrc` sidecar files into the matching audio files.
-    func embedLRCFiles(folders: [String], recursive: Bool, keepLRC: Bool, lyricsStyle: LyricsStyle) {
+    func embedLRCFiles(folders: [String], recursive: Bool, lyricsStyle: LyricsStyle) {
         runLyricsTask(
             folders: folders,
             title: "Embedding Lyrics",
@@ -498,7 +494,7 @@ final class DownloadViewModel: ObservableObject {
             try service.embedLRCFiles(
                 folders: validFolders,
                 recursive: recursive,
-                keepLRC: keepLRC,
+                keepLRC: false,
                 lyricsStyle: lyricsStyle,
                 output: output,
                 completion: completion

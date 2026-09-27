@@ -47,6 +47,7 @@ from urllib.parse import quote_plus, urlparse
 import unicodedata
 
 import requests as req
+import yaml
 from yt_dlp import YoutubeDL
 
 try:
@@ -145,8 +146,9 @@ MODIFIER_KEYWORDS = (
     "mashup",
     "demo",
 )
-LRC_TIMESTAMP_RE = re.compile(r"\[\d{1,2}:\d{2}(?:[.:]\d{1,3})?\]")
-LRC_TIMESTAMP_PARTS_RE = re.compile(r"\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]")
+LRC_TIMESTAMP_RE = re.compile(r"\[\d+:\d{2}(?:[.:]\d{1,3})?\]")
+LRC_TIMESTAMP_PARTS_RE = re.compile(r"\[(\d+):(\d{2})(?:[.:](\d{1,3}))?\]")
+INLINE_LRC_TIMESTAMP_RE = re.compile(r"<(\d+):(\d{2})(?:[.:](\d{1,3}))?>")
 LRC_METADATA_RE = re.compile(r"^\s*\[[A-Za-z#]+:[^\]]*\]\s*$")
 # Spotify appends edition notes ("- 2015 Remaster", "(Mono Version)") that
 # YouTube uploads rarely repeat. Tails made only of these words are dropped
@@ -183,19 +185,23 @@ class Track:
 class Lyrics:
     plain: str | None = None
     synced: str | None = None
+    enhanced: str | None = None
+    timed_segments: tuple[tuple[str, int], ...] = ()
 
     def __bool__(self) -> bool:
-        return bool(self.plain or self.synced)
+        return bool(self.plain or self.synced or self.enhanced)
 
     def text(self, style: str = "plain") -> str | None:
         """Text for the standard lyrics tag: LRC timestamps only when asked for."""
-        if style == "synced" and self.synced:
-            return self.synced
+        if style == "synced" and (self.enhanced or self.synced):
+            return self.enhanced or self.synced
         if self.plain:
             return self.plain
         return strip_lrc_timestamps(self.synced) if self.synced else None
 
     def synced_lines(self) -> list[tuple[str, int]]:
+        if self.timed_segments:
+            return list(self.timed_segments)
         return parse_lrc(self.synced) if self.synced else []
 
 
@@ -1143,12 +1149,10 @@ def write_ogg_tags(path: Path, track: Track, pos: int | None) -> None:
 def embed_lyrics(path: Path, lyrics: Lyrics | None, style: str = "plain") -> bool:
     """Write lyrics into the audio file itself, touching only lyric tags.
 
-    Every format gets the standard lyrics tag (USLT, \xa9lyr, or LYRICS), which
-    Apple Music and most players display. MP3 also gets a SYLT frame so the
-    timing travels inside the file instead of in a .lrc sidecar. With the
-    "synced" style the standard tag holds timestamped LRC text, which players
-    such as Poweramp, MusicBee, foobar2000, Jellyfin, and Navidrome scroll
-    line by line.
+    Every supported format gets a standard lyrics tag (USLT, \xa9lyr, or
+    LYRICS). MP3 also gets a SYLT frame with word timing when available, or
+    line timing otherwise. The "synced" style puts enhanced timestamped text
+    in the standard tag for players that read it; no sidecar is required.
     """
     if not HAS_MUTAGEN or not lyrics:
         return False
@@ -1230,26 +1234,112 @@ def strip_lrc_timestamps(synced: str) -> str:
     for raw_line in synced.splitlines():
         if LRC_METADATA_RE.match(raw_line):
             continue
-        cleaned = LRC_TIMESTAMP_RE.sub("", raw_line).strip()
+        cleaned = INLINE_LRC_TIMESTAMP_RE.sub("", LRC_TIMESTAMP_RE.sub("", raw_line)).strip()
         lines.append(cleaned)
     return "\n".join(lines).strip("\n")
 
 
 def parse_lrc(synced: str) -> list[tuple[str, int]]:
-    """Return (line, milliseconds) pairs sorted by time, as SYLT expects."""
+    """Return line or inline word timing as (text, milliseconds) pairs."""
     lines: list[tuple[str, int]] = []
     for raw_line in synced.splitlines():
         stamps = list(LRC_TIMESTAMP_PARTS_RE.finditer(raw_line))
         if not stamps:
             continue
         text = LRC_TIMESTAMP_RE.sub("", raw_line).strip()
+        inline = list(INLINE_LRC_TIMESTAMP_RE.finditer(text))
+        if inline:
+            prefix = text[:inline[0].start()]
+            if prefix:
+                lines.append((prefix, timestamp_ms(stamps[0])))
+            for index, stamp in enumerate(inline):
+                end = inline[index + 1].start() if index + 1 < len(inline) else len(text)
+                segment = text[stamp.end():end]
+                if segment:
+                    lines.append((segment, timestamp_ms(stamp)))
+            continue
         for stamp in stamps:
-            minutes, seconds, fraction = stamp.groups()
-            fraction = fraction or "0"
-            millis = int(fraction.ljust(3, "0")[:3])
-            lines.append((text, (int(minutes) * 60 + int(seconds)) * 1000 + millis))
+            lines.append((text, timestamp_ms(stamp)))
     lines.sort(key=lambda item: item[1])
     return lines
+
+
+def timestamp_ms(stamp: re.Match[str]) -> int:
+    minutes, seconds, fraction = stamp.groups()
+    return (int(minutes) * 60 + int(seconds)) * 1000 + int((fraction or "0").ljust(3, "0")[:3])
+
+
+def format_lrc_timestamp(milliseconds: int, inline: bool = False) -> str:
+    minutes, remainder = divmod(milliseconds, 60_000)
+    seconds, millis = divmod(remainder, 1_000)
+    stamp = f"{minutes:02d}:{seconds:02d}.{millis:03d}"
+    return f"<{stamp}>" if inline else f"[{stamp}]"
+
+
+def lyrics_from_lyricsfile(value: object) -> Lyrics | None:
+    """Use real word timestamps from LRCLIB's Lyricsfile when present."""
+    if not isinstance(value, str) or len(value) > 300_000:
+        return None
+    try:
+        document = yaml.safe_load(value)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(document, dict) or document.get("version") != "1.0":
+        return None
+
+    plain = document.get("plain")
+    plain = plain if isinstance(plain, str) and plain.strip() else None
+    raw_lines = document.get("lines")
+    if not isinstance(raw_lines, list):
+        return Lyrics(plain=plain) if plain else None
+
+    plain_lines: list[str] = []
+    standard_lines: list[str] = []
+    enhanced_lines: list[str] = []
+    segments: list[tuple[str, int]] = []
+    has_words = False
+    for line in raw_lines[:2_000]:
+        if not isinstance(line, dict):
+            continue
+        line_text, start = line.get("text"), line.get("start_ms")
+        if not isinstance(line_text, str) or not line_text or type(start) is not int or start < 0:
+            continue
+        line_stamp = format_lrc_timestamp(start)
+        plain_lines.append(line_text)
+        standard_lines.append(line_stamp + line_text)
+
+        raw_words = line.get("words")
+        words: list[tuple[str, int]] = []
+        if isinstance(raw_words, list) and len(raw_words) <= 500:
+            for word in raw_words:
+                if not isinstance(word, dict):
+                    break
+                word_text, word_start = word.get("text"), word.get("start_ms")
+                if not isinstance(word_text, str) or not word_text or type(word_start) is not int or word_start < 0:
+                    break
+                words.append((word_text, word_start))
+        if words and len(words) == len(raw_words) and "".join(word for word, _ in words) == line_text:
+            has_words = True
+            enhanced_lines.append(line_stamp + "".join(format_lrc_timestamp(at, inline=True) + word for word, at in words))
+            if segments:
+                first, at = words[0]
+                words[0] = ("\n" + first, at)
+            segments.extend(words)
+        else:
+            enhanced_lines.append(line_stamp + line_text)
+            segments.append(("\n" + line_text if segments else line_text, start))
+
+    synced = "\n".join(standard_lines) or None
+    if not plain and plain_lines:
+        plain = "\n".join(plain_lines)
+    if not (plain or synced):
+        return None
+    return Lyrics(
+        plain=plain,
+        synced=synced,
+        enhanced="\n".join(enhanced_lines) if has_words else None,
+        timed_segments=tuple(sorted(segments, key=lambda item: item[1])) if has_words else (),
+    )
 
 
 def lyrics_from_record(record: dict) -> str | None:
@@ -1265,10 +1355,14 @@ def lyrics_from_record(record: dict) -> str | None:
 def lyrics_payload_from_record(record: dict | None) -> Lyrics | None:
     if not record:
         return None
+    detailed = lyrics_from_lyricsfile(record.get("lyricsfile"))
     synced = record.get("syncedLyrics")
+    legacy_synced = synced if isinstance(synced, str) and synced.strip() else None
     payload = Lyrics(
-        plain=lyrics_from_record(record),
-        synced=synced if isinstance(synced, str) and synced.strip() else None,
+        plain=lyrics_from_record(record) or (detailed.plain if detailed else None),
+        synced=legacy_synced or (detailed.synced if detailed else None),
+        enhanced=detailed.enhanced if detailed else None,
+        timed_segments=detailed.timed_segments if detailed else (),
     )
     return payload or None
 
@@ -1299,7 +1393,7 @@ def _search_lyrics_record(track: Track) -> dict | None:
     wanted_modifiers = extract_modifiers(clean_track_title(track.name))
     best: tuple[float, dict] | None = None
     for item in results:
-        if not isinstance(item, dict) or not (item.get("plainLyrics") or item.get("syncedLyrics")):
+        if not isinstance(item, dict) or not (item.get("plainLyrics") or item.get("syncedLyrics") or item.get("lyricsfile")):
             continue
         item_title = clean_track_title(str(item.get("trackName") or ""))
         if wanted_title != normalize_match_text(item_title) or wanted_modifiers != extract_modifiers(item_title):
@@ -1343,8 +1437,8 @@ def _lyrics_record(track: Track) -> dict | None:
 
 
 def fetch_lyrics(track: Track) -> str | None:
-    record = _lyrics_record(track)
-    return lyrics_from_record(record) if record else None
+    lyrics = lyrics_payload_from_record(_lyrics_record(track))
+    return lyrics.text() if lyrics else None
 
 
 def fetch_lyrics_payload(track: Track) -> Lyrics | None:
@@ -2257,7 +2351,7 @@ def apply_track_lyrics(path: Path, track: Track, options: RunOptions) -> Lyrics 
         return None
     lyrics = fetch_lyrics_payload(track)
     if lyrics and lyrics.synced and options.write_lrc:
-        write_lrc_sidecar(path, lyrics.synced)
+        write_lrc_sidecar(path, lyrics.text("synced") or lyrics.synced)
     return lyrics
 
 

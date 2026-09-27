@@ -153,7 +153,6 @@ private struct AudioSettingsTab: View {
 private struct LyricsSettingsTab: View {
     @AppStorage("searchLyrics") private var searchLyrics = true
     @AppStorage("lyricsStyle") private var lyricsStyle = LyricsStyle.plain.rawValue
-    @AppStorage("writeLRCSidecar") private var writeLRCSidecar = false
 
     private var selectedStyle: LyricsStyle {
         LyricsStyle(rawValue: lyricsStyle) ?? .plain
@@ -164,7 +163,7 @@ private struct LyricsSettingsTab: View {
             Section("Embedded lyrics") {
                 SettingHelpRow(
                     title: "Lyrics",
-                    help: "Looks up lyrics on LRCLib and writes them inside each song (MP3, M4A, FLAC, Opus, Ogg)."
+                    help: "Looks up lyrics on LRCLib and writes them inside each song (MP3, M4A, FLAC, Opus, Ogg). Word timing is used when available. No .lrc file is created."
                 ) {
                     Toggle("Embed lyrics in songs", isOn: $searchLyrics)
                 }
@@ -180,15 +179,7 @@ private struct LyricsSettingsTab: View {
                 }
             }
 
-            Section("Sidecar files") {
-                SettingHelpRow(
-                    title: ".lrc sidecar",
-                    help: "Off by default: lyrics already live inside the song. Turn on only if a player needs separate .lrc files."
-                ) {
-                    Toggle("Also save a .lrc file next to each song", isOn: $writeLRCSidecar)
-                        .disabled(!searchLyrics)
-                }
-
+            Section("Existing .lrc files") {
                 Text("Already have .lrc files? Use Library Tools > Embed .lrc Lyrics to move them into your songs.")
                     .font(.caption)
                     .foregroundStyle(.secondary)

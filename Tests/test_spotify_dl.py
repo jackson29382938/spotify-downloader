@@ -869,6 +869,24 @@ class TitleCleanupTests(unittest.TestCase):
 
 class EmbeddedLyricsTests(unittest.TestCase):
     SYNCED = "[ar: Artist]\n[00:01.50]First line\n[00:03.00][00:10.25]Chorus\n"
+    WORD_TIMED = """version: '1.0'
+metadata:
+  title: Song
+  artist: Artist
+lines:
+  - text: 'Hello world'
+    start_ms: 1200
+    words:
+      - text: 'Hello '
+        start_ms: 1200
+      - text: 'world'
+        start_ms: 1900
+  - text: 'Second line'
+    start_ms: 3000
+plain: |-
+  Hello world
+  Second line
+"""
 
     def setUp(self):
         with dl.LYRICS_CACHE_LOCK:
@@ -885,6 +903,52 @@ class EmbeddedLyricsTests(unittest.TestCase):
         lyrics = dl.Lyrics(plain=None, synced=self.SYNCED)
         self.assertEqual(lyrics.text("plain"), "First line\nChorus")
         self.assertEqual(lyrics.text("synced"), self.SYNCED)
+
+    def test_lyricsfile_embeds_real_word_times_and_keeps_clean_plain_text(self):
+        from mutagen.id3 import ID3
+
+        record = {
+            "plainLyrics": "Hello world\nSecond line",
+            "syncedLyrics": "[00:01.20]Hello world\n[00:03.00]Second line",
+            "lyricsfile": self.WORD_TIMED,
+        }
+        lyrics = dl.lyrics_payload_from_record(record)
+        self.assertEqual(lyrics.text("synced"),
+                         "[00:01.200]<00:01.200>Hello <00:01.900>world\n[00:03.000]Second line")
+        self.assertEqual(dl.strip_lrc_timestamps(lyrics.text("synced")), "Hello world\nSecond line")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "song.mp3"
+            audio.write_bytes(b"\x00" * 512)
+            self.assertTrue(dl.embed_lyrics(audio, lyrics))
+            tags = ID3(str(audio))
+            self.assertEqual(tags.getall("USLT")[0].text, "Hello world\nSecond line")
+            self.assertEqual(tags.getall("SYLT")[0].text,
+                             [("Hello ", 1200), ("world", 1900), ("\nSecond line", 3000)])
+            self.assertFalse(audio.with_suffix(".lrc").exists())
+
+    def test_enhanced_lrc_import_preserves_word_times(self):
+        enhanced = "[00:01.20]<00:01.20>Hello <00:01.90>world"
+        lyrics = dl.lyrics_from_lrc_text(enhanced)
+        self.assertEqual(lyrics.plain, "Hello world")
+        self.assertEqual(lyrics.synced_lines(), [("Hello ", 1200), ("world", 1900)])
+
+    def test_invalid_lyricsfile_falls_back_to_line_timing(self):
+        record = {"syncedLyrics": self.SYNCED, "lyricsfile": "version: '2.0'\nlines: []"}
+        lyrics = dl.lyrics_payload_from_record(record)
+        self.assertEqual(lyrics.synced_lines()[0], ("First line", 1500))
+        self.assertEqual(lyrics.enhanced, None)
+
+    def test_lyricsfile_without_legacy_fields_uses_words_but_never_invents_missing_times(self):
+        lyrics = dl.lyrics_payload_from_record({"lyricsfile": self.WORD_TIMED})
+        self.assertEqual(lyrics.plain, "Hello world\nSecond line")
+        self.assertEqual(lyrics.synced_lines(),
+                         [("Hello ", 1200), ("world", 1900), ("\nSecond line", 3000)])
+
+        mismatched = self.WORD_TIMED.replace("text: 'world'", "text: 'wrong'")
+        lyrics = dl.lyrics_payload_from_record({"lyricsfile": mismatched})
+        self.assertEqual(lyrics.synced_lines()[0], ("Hello world", 1200))
+        self.assertIsNone(lyrics.enhanced)
 
     def test_mp3_gets_plain_lyrics_and_sylt_timing_inside_the_file(self):
         from mutagen.id3 import ID3

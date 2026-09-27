@@ -8,7 +8,6 @@ struct EmbedLyricsView: View {
     @AppStorage("downloadFolderPath") private var downloadFolderPath = Defaults.downloadsPath
     @AppStorage("libraryRecursive") private var libraryRecursive = true
     @AppStorage("lyricsStyle") private var lyricsStyle = LyricsStyle.plain.rawValue
-    @AppStorage("embedLRCKeepFiles") private var keepLRCFiles = false
 
     private var libraryFolders: [String] {
         libraryFolderPathsRaw
@@ -46,12 +45,6 @@ struct EmbedLyricsView: View {
                         .labelsHidden()
                         .frame(width: 170)
                     }
-
-                    SettingBlock("Sidecars", help: "Leave off to delete each .lrc once its lyrics are inside the song.") {
-                        Toggle("Keep .lrc files", isOn: $keepLRCFiles)
-                            .toggleStyle(.checkbox)
-                            .fixedSize()
-                    }
                 }
 
                 HStack {
@@ -59,7 +52,6 @@ struct EmbedLyricsView: View {
                         viewModel.embedLRCFiles(
                             folders: targetFolders,
                             recursive: libraryRecursive,
-                            keepLRC: keepLRCFiles,
                             lyricsStyle: LyricsStyle(rawValue: lyricsStyle) ?? .plain
                         )
                     } label: {

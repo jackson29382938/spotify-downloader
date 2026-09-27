@@ -142,11 +142,12 @@ Lyrics from LRCLib are written inside each song, not as separate files:
 
 - The standard lyrics tag (MP3 `USLT`, M4A `©lyr`, FLAC/Ogg `LYRICS`) gets
   readable text that Apple Music and most players show.
-- MP3 files also get an `SYLT` frame with line timing.
-- `--lyrics-style synced` stores timestamped LRC text in the lyrics tag instead,
-  for players that scroll lyrics (Poweramp, MusicBee, foobar2000, Jellyfin,
-  Navidrome).
-- `.lrc` sidecar files are off by default; pass `--lrc` to also write them.
+- MP3 files also get an embedded `SYLT` frame with word timing when LRCLib
+  provides it, falling back to line timing for other songs.
+- `--lyrics-style synced` stores enhanced word-timestamped text in the lyrics
+  tag when available, or line-timestamped text otherwise, for compatible players.
+- The Mac app creates no `.lrc` sidecar files. The command line tool retains
+  `--lrc` for people who explicitly need a separate file.
 
 Move existing `.lrc` files into their songs (and delete the `.lrc` files):
 
@@ -154,8 +155,8 @@ Move existing `.lrc` files into their songs (and delete the `.lrc` files):
 python3 spotify_dl.py embed-lrc "$HOME/Downloads" "$HOME/Music"
 ```
 
-Apple Music only scrolls time-synced lyrics for songs streamed from its own
-catalog; for your own files it shows the lyrics tag as plain text. If songs show
+Apple Music only scrolls time-synced lyrics for songs from its own catalog;
+for your own files it shows the lyrics tag as plain text. If songs show
 `[00:42.92]` timestamps there, turn them back into clean text (MP3 files keep the
 timing in their `SYLT` frame):
 

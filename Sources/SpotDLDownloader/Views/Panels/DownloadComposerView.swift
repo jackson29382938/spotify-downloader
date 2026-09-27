@@ -13,7 +13,6 @@ struct DownloadComposerView: View {
     @AppStorage("matchFlexibility") private var matchFlexibility = MatchFlexibility.defaultValue
     @AppStorage("searchLyrics") private var searchLyrics = true
     @AppStorage("lyricsStyle") private var lyricsStyle = LyricsStyle.plain.rawValue
-    @AppStorage("writeLRCSidecar") private var writeLRC = false
     @AppStorage("cookiesBrowser") private var cookiesBrowser = CookiesBrowser.none.rawValue
     @AppStorage("artworkMaxSize") private var artworkMaxSize = ArtworkMaxSize.unlimited.rawValue
     @AppStorage("artworkJpeg") private var artworkJpeg = false
@@ -166,7 +165,6 @@ struct DownloadComposerView: View {
                     matchFlexibility: matchFlexibility,
                     searchLyrics: searchLyrics,
                     lyricsStyle: selectedLyricsStyle,
-                    writeLRC: writeLRC,
                     cookiesBrowser: selectedCookiesBrowser,
                     artworkMaxSize: selectedArtworkMaxSize,
                     artworkJpeg: artworkJpeg,
@@ -193,7 +191,6 @@ struct DownloadComposerView: View {
                     matchFlexibility: matchFlexibility,
                     searchLyrics: searchLyrics,
                     lyricsStyle: selectedLyricsStyle,
-                    writeLRC: writeLRC,
                     cookiesBrowser: selectedCookiesBrowser,
                     artworkMaxSize: selectedArtworkMaxSize,
                     artworkJpeg: artworkJpeg,

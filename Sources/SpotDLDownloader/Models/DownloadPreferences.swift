@@ -163,16 +163,16 @@ enum LyricsStyle: String, CaseIterable, Identifiable {
         case .plain:
             "Plain text"
         case .synced:
-            "Timestamped (LRC)"
+            "Timed text inside song"
         }
     }
 
     var help: String {
         switch self {
         case .plain:
-            "Clean lyrics text, which is what Apple Music shows. MP3s also keep line timing in a hidden SYLT frame for players that use it. Apple Music cannot scroll lyrics for your own files."
+            "Clean lyrics text for Apple Music. MP3s also keep word timing when LRCLib has it, or line timing otherwise, in an embedded SYLT frame. Apple Music does not animate timing for personal files."
         case .synced:
-            "Timestamped lines for players that scroll lyrics (Poweramp, MusicBee, foobar2000, Jellyfin, Navidrome). Apple Music shows the [00:12.34] timestamps as plain text."
+            "Timestamped text inside the song, with word timing when LRCLib has it and line timing otherwise. Compatible players can scroll it. Apple Music shows the timestamp codes as text for personal files."
         }
     }
 }

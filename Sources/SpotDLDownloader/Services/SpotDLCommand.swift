@@ -13,7 +13,6 @@ struct DownloadCommand {
     var matchFlexibility: Double
     var searchLyrics: Bool
     var lyricsStyle: LyricsStyle
-    var writeLRC: Bool
     var cookiesBrowser: CookiesBrowser
     var artworkMaxSize: ArtworkMaxSize
     var artworkJpeg: Bool
@@ -55,10 +54,6 @@ struct DownloadCommand {
 
         if searchLyrics, lyricsStyle != .plain {
             values.append(contentsOf: ["--lyrics-style", lyricsStyle.rawValue])
-        }
-
-        if searchLyrics, writeLRC {
-            values.append("--lrc")
         }
 
         if let cookies = cookiesBrowser.flagValue {

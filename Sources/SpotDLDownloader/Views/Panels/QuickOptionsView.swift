@@ -69,7 +69,7 @@ struct QuickOptionsView: View {
                         Toggle("Lyrics", isOn: $searchLyrics)
                             .toggleStyle(.checkbox)
                             .fixedSize()
-                            .help("Embed lyrics inside each song. Style and .lrc options are in Settings > Lyrics.")
+                            .help("Embed lyrics and available timing inside each song. Style is in Settings > Lyrics; no extra .lrc file is created.")
 
                         MatchFlexibilityControl()
 

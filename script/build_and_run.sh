@@ -45,6 +45,7 @@ ensure_python_env() {
 import PyInstaller  # noqa: F401
 import mutagen  # noqa: F401
 import requests  # noqa: F401
+import yaml  # noqa: F401
 import yt_dlp  # noqa: F401
 import yt_dlp_ejs  # noqa: F401
 from importlib.metadata import version
