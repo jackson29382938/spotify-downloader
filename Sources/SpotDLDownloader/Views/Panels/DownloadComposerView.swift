@@ -21,6 +21,8 @@ struct DownloadComposerView: View {
     @AppStorage("appleMusicPlaylistName") private var appleMusicPlaylistName = Defaults.appleMusicPlaylistName
     @AppStorage("downloadRetries") private var downloadRetries = 2
     @State private var confirmDeleteCompleted = false
+    @FocusState private var inputFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var selectedMediaKind: MediaKind {
         MediaKind(rawValue: mediaKind) ?? .audio
@@ -53,36 +55,56 @@ struct DownloadComposerView: View {
 
     var body: some View {
         Card {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
                         Label(
-                            selectedMediaKind == .video ? "YouTube Video Links" : "Spotify or YouTube Audio Links",
+                            selectedMediaKind == .video ? "Add video links" : "Add your links",
                             systemImage: selectedMediaKind == .video ? "video" : "link"
                         )
-                        .font(.title2.weight(.semibold))
+                        .font(.headline)
                         .labelStyle(.titleAndIcon)
 
-                        Text("\(viewModel.parsedQueries.count) queued · one link per line")
+                        Text(selectedMediaKind == .video ? "YouTube · one link per line" : "Spotify or YouTube · one link per line")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
 
                     Spacer()
 
-                    actionButtons
+                    Text("\(viewModel.parsedQueries.count) link\(viewModel.parsedQueries.count == 1 ? "" : "s")")
+                        .font(.caption.weight(.medium).monospacedDigit())
+                        .foregroundStyle(Theme.accent)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Theme.accent.opacity(0.08), in: Capsule())
                 }
 
-                TextEditor(text: $viewModel.linkText)
-                    .font(.system(.body, design: .monospaced))
-                    .scrollContentBackground(.hidden)
-                    .padding(10)
-                    .frame(minHeight: 120)
-                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: Theme.innerRadius))
+                ZStack(alignment: .topLeading) {
+                    TextEditor(text: $viewModel.linkText)
+                        .font(.system(size: 13, design: .monospaced))
+                        .scrollContentBackground(.hidden)
+                        .focused($inputFocused)
+                        .accessibilityLabel("Links to download, one per line")
+                    if viewModel.linkText.isEmpty {
+                        Text("Paste a song, album, or playlist link…")
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.top, 1)
+                            .allowsHitTesting(false)
+                    }
+                }
+                    .padding(12)
+                    .frame(height: 128)
+                    .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.innerRadius))
                     .overlay {
                         RoundedRectangle(cornerRadius: Theme.innerRadius)
-                            .stroke(.separator.opacity(0.7))
+                            .stroke(inputFocused ? Theme.accent.opacity(0.8) : Theme.border, lineWidth: inputFocused ? 1.5 : 1)
                     }
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: inputFocused)
+
+                actionButtons
 
                 if let errorMessage = viewModel.errorMessage {
                     Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
@@ -115,7 +137,7 @@ struct DownloadComposerView: View {
     }
 
     private var actionButtons: some View {
-        HStack(spacing: 10) {
+        FlowLayout(horizontalSpacing: 10, verticalSpacing: 10) {
             if viewModel.isDownloadRunning {
                 Menu {
                     Button {
@@ -152,6 +174,16 @@ struct DownloadComposerView: View {
             }
             .disabled(viewModel.status.isRunning || viewModel.isPreviewing || viewModel.parsedQueries.isEmpty)
 
+            if viewModel.canRetryFailed {
+                retryButton
+            }
+
+            downloadButton
+        }
+        .controlSize(.large)
+    }
+
+    private var retryButton: some View {
             Button {
                 viewModel.retryFailedItems(
                     outputFolder: downloadFolderPath,
@@ -177,7 +209,9 @@ struct DownloadComposerView: View {
                 Label("Retry Failed", systemImage: "arrow.clockwise")
             }
             .disabled(!viewModel.canRetryFailed)
+    }
 
+    private var downloadButton: some View {
             Button {
                 viewModel.startDownload(
                     outputFolder: downloadFolderPath,
@@ -206,7 +240,7 @@ struct DownloadComposerView: View {
                 )
             }
             .buttonStyle(.borderedProminent)
+            .keyboardShortcut(.return, modifiers: .command)
             .disabled(!viewModel.canDownload)
-        }
     }
 }

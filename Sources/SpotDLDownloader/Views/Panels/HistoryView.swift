@@ -35,15 +35,15 @@ struct HistoryView: View {
                 }
 
                 if viewModel.historyEntries.isEmpty {
-                    Text("Completed download sessions appear here, with their source link, format, and results.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: Theme.innerRadius))
+                    EmptyState(title: "A home for your listening history", message: "Completed sessions appear here with their source, format, and results.", systemImage: "clock.arrow.circlepath")
                 } else {
                     TextField("Filter by link, folder, or format", text: $searchText)
                         .textFieldStyle(.roundedBorder)
+                        .controlSize(.large)
+
+                    if filteredEntries.isEmpty {
+                        EmptyState(title: "No matching downloads", message: "Try a different link, folder name, or format.", systemImage: "magnifyingglass", compact: true)
+                    }
 
                     VStack(spacing: 0) {
                         ForEach(Array(filteredEntries.enumerated()), id: \.element.id) { index, entry in
@@ -55,10 +55,10 @@ struct HistoryView: View {
                             }
                         }
                     }
-                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: Theme.innerRadius))
+                    .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.innerRadius))
                     .overlay {
                         RoundedRectangle(cornerRadius: Theme.innerRadius)
-                            .stroke(.separator.opacity(0.5))
+                            .stroke(Theme.border)
                     }
                 }
             }
@@ -73,8 +73,9 @@ private struct HistoryRow: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: entry.isVideo ? "film" : "music.note")
-                .foregroundStyle(.secondary)
-                .frame(width: 16)
+                .foregroundStyle(Theme.accent)
+                .frame(width: 34, height: 34)
+                .background(Theme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.sourceURL)
@@ -103,9 +104,10 @@ private struct HistoryRow: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Reveal download folder")
             .help("Reveal output folder in Finder")
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.vertical, 12)
     }
 }

@@ -29,9 +29,16 @@ struct QuickOptionsView: View {
     }
 
     var body: some View {
-        Card(padding: 12) {
-            VStack(alignment: .leading, spacing: 10) {
-                FlowLayout(horizontalSpacing: 16, verticalSpacing: 10) {
+        Card {
+            VStack(alignment: .leading, spacing: 16) {
+                SectionHeader("Download options", systemImage: "slider.horizontal.3") {
+                    SettingsLink {
+                        Label("All Settings", systemImage: "gearshape")
+                    }
+                    .controlSize(.small)
+                }
+
+                FlowLayout(horizontalSpacing: 20, verticalSpacing: 14) {
                     Picker("Media", selection: $mediaKind) {
                         ForEach(MediaKind.allCases) { kind in
                             Label(kind.label, systemImage: kind.systemImage).tag(kind.rawValue)
@@ -64,22 +71,20 @@ struct QuickOptionsView: View {
                     }
                     .fixedSize()
                     .help("Skip keeps files, Metadata refreshes tags and lyrics, Replace downloads again.")
+                }
 
-                    if selectedMediaKind == .audio {
+                if selectedMediaKind == .audio {
+                    Divider()
+                    FlowLayout(horizontalSpacing: 24, verticalSpacing: 14) {
                         Toggle("Lyrics", isOn: $searchLyrics)
                             .toggleStyle(.checkbox)
                             .fixedSize()
                             .help("Embed lyrics and available timing inside each song. Style is in Settings > Lyrics; no extra .lrc file is created.")
 
-                        MatchFlexibilityControl()
-
                         AppleMusicPlaylistField()
-                    }
 
-                    SettingsLink {
-                        Label("All Settings", systemImage: "gearshape")
+                        MatchFlexibilityControl()
                     }
-                    .fixedSize()
                 }
 
                 statusNotes

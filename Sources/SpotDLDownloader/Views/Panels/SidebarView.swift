@@ -8,15 +8,27 @@ struct SidebarView: View {
 
     var body: some View {
         List(selection: $selection) {
-            Section {
+            Section("Workspace") {
                 ForEach(AppSection.allCases) { section in
                     Label(section.title, systemImage: section.systemImage)
+                        .font(.system(size: 13, weight: selection == section ? .semibold : .regular))
+                        .padding(.vertical, 5)
                         .badge(badgeCount(for: section))
                         .tag(section)
                 }
             }
 
-            Section("Status") {
+        }
+        .listStyle(.sidebar)
+        .safeAreaInset(edge: .top) {
+            AppLogoLockup(logoSize: 42)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.top, 18)
+                .padding(.bottom, 20)
+        }
+        .safeAreaInset(edge: .bottom) {
+            VStack(alignment: .leading, spacing: 14) {
                 StatusRow(status: viewModel.status)
                 if viewModel.progressSummary.total > 0 {
                     Text(viewModel.progressSummary.statusText)
@@ -24,29 +36,18 @@ struct SidebarView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
-            }
-
-            Section("Download Folder") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Label(URL(fileURLWithPath: downloadFolderPath).lastPathComponent, systemImage: "folder")
-                    Text(downloadFolderPath)
-                        .font(.caption)
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("SAVE TO")
+                        .font(.system(size: 10, weight: .semibold))
+                        .tracking(1)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
+                    Label(URL(fileURLWithPath: downloadFolderPath).lastPathComponent, systemImage: "folder")
+                        .font(.callout.weight(.medium))
+                        .lineLimit(1)
+                        .help(downloadFolderPath)
                 }
-            }
-        }
-        .listStyle(.sidebar)
-        .safeAreaInset(edge: .top) {
-            AppLogoLockup(logoSize: 32)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
-        }
-        .safeAreaInset(edge: .bottom) {
-            HStack(spacing: 8) {
+                HStack(spacing: 8) {
                 Button {
                     viewModel.openFolder(path: downloadFolderPath)
                 } label: {
@@ -62,12 +63,13 @@ struct SidebarView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .help("Choose a different download folder")
+                }
             }
             .buttonStyle(.bordered)
             .controlSize(.regular)
             .padding()
         }
-        .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 300)
+        .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
     }
 
     /// Small counts next to each destination so state is visible without opening the page.
@@ -97,23 +99,10 @@ private struct StatusRow: View {
     let status: DownloadStatus
 
     var body: some View {
-        Label(status.title, systemImage: status.systemImage)
-            .foregroundStyle(color)
+        Label(status.displayTitle, systemImage: status.systemImage)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(status.tint)
             .lineLimit(2)
-    }
-
-    private var color: Color {
-        switch status {
-        case .ready, .succeeded:
-            .green
-        case .missingDependency, .failed:
-            .orange
-        case .running, .repairing:
-            .accentColor
-        case .paused, .stopped, .cancelled:
-            .secondary
-        default:
-            .primary
-        }
+            .help(status.title)
     }
 }

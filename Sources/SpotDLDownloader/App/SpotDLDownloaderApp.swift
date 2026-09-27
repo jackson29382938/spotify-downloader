@@ -10,10 +10,12 @@ struct SpotDLDownloaderApp: App {
             ContentView()
                 .frame(minWidth: 820, minHeight: 620)
         }
+        .defaultSize(width: 1140, height: 850)
         .windowResizability(.contentMinSize)
 
         Settings {
             SettingsView()
+                .tint(Theme.accent)
         }
     }
 }

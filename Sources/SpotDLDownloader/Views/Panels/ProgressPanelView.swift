@@ -4,6 +4,7 @@ struct ProgressPanelView: View {
     @ObservedObject var viewModel: DownloadViewModel
     /// On the Download page the song list grows with the window.
     var fillsHeight = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Card {
@@ -12,7 +13,8 @@ struct ProgressPanelView: View {
                     StatusBadge(status: viewModel.status)
                 }
 
-                VStack(alignment: .leading, spacing: 8) {
+                if !viewModel.progressItems.isEmpty || viewModel.status.isRunning {
+                    VStack(alignment: .leading, spacing: 10) {
                     HStack {
                         Text(viewModel.progressSummary.title)
                             .font(.callout.weight(.medium))
@@ -27,14 +29,17 @@ struct ProgressPanelView: View {
                     ProgressView(value: viewModel.progressSummary.progress)
                         .progressViewStyle(.linear)
                         .tint(progressTint(for: summaryState))
+                        .animation(reduceMotion ? nil : .easeOut(duration: 0.25), value: viewModel.progressSummary.progress)
+                    }
                 }
 
                 if viewModel.progressItems.isEmpty {
-                    Label(viewModel.status.title, systemImage: viewModel.status.systemImage)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 4)
+                    EmptyState(
+                        title: viewModel.status.isRunning ? "Getting things ready" : "Follow every track",
+                        message: viewModel.status.isRunning ? "Your tracks will appear here as they begin." : "Artwork, download progress, and results will appear here.",
+                        systemImage: "waveform",
+                        compact: true
+                    )
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 10) {
@@ -46,7 +51,8 @@ struct ProgressPanelView: View {
                             }
                         }
                     }
-                    .frame(maxHeight: fillsHeight ? CGFloat.infinity : 260)
+                    .frame(height: fillsHeight ? nil : min(CGFloat(viewModel.progressItems.count) * 83, 300))
+                    .frame(maxHeight: fillsHeight ? CGFloat.infinity : nil)
                 }
             }
             .frame(maxHeight: fillsHeight ? CGFloat.infinity : nil, alignment: .top)
@@ -75,11 +81,12 @@ struct ProgressPanelView: View {
 
 private struct ProgressSongRow: View {
     let item: DownloadProgressItem
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
             CoverView(urlString: item.coverURL)
-                .frame(width: 38, height: 38)
+                .frame(width: 44, height: 44)
 
             VStack(alignment: .leading, spacing: 5) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -102,8 +109,10 @@ private struct ProgressSongRow: View {
                 ProgressView(value: item.progress)
                     .progressViewStyle(.linear)
                     .tint(progressTint(for: item.state))
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.25), value: item.progress)
             }
         }
+        .padding(.vertical, 5)
         .contentShape(Rectangle())
         .contextMenu {
             Button("Copy") {

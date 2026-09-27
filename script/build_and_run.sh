@@ -73,7 +73,7 @@ BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
 
 ensure_python_env
 
-if [[ ! -f "$APP_ICON" || "$ROOT_DIR/script/generate_app_icon.py" -nt "$APP_ICON" || "$ROOT_DIR/Resources/logo.svg" -nt "$APP_ICON" ]]; then
+if [[ ! -f "$APP_ICON" || "$ROOT_DIR/script/generate_app_icon.py" -nt "$APP_ICON" || "$ROOT_DIR/Resources/logo.svg" -nt "$APP_ICON" || "$ROOT_DIR/Resources/AppIconSource.png" -nt "$APP_ICON" ]]; then
   echo "Generating app icon..."
   "$PYTHON_BIN" "$ROOT_DIR/script/generate_app_icon.py"
 fi

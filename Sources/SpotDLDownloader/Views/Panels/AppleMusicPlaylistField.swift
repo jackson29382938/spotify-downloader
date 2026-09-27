@@ -9,6 +9,7 @@ struct AppleMusicPlaylistField: View {
     @AppStorage("appleMusicPlaylistName") private var playlistName = Defaults.appleMusicPlaylistName
     @AppStorage("audioFormat") private var audioFormat = AudioFormat.mp3.rawValue
     @ObservedObject private var checker = AppleMusicPlaylistChecker.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var trimmedName: String {
         playlistName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -49,7 +50,7 @@ struct AppleMusicPlaylistField: View {
                 }
             }
         }
-        .animation(.easeOut(duration: 0.15), value: checker.exists(trimmedName))
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: checker.exists(trimmedName))
         .task(id: addToAppleMusic ? trimmedName : "") {
             guard addToAppleMusic else { return }
             // Wait for typing to pause before asking Music for its playlists.

@@ -3,11 +3,29 @@ import SwiftUI
 
 /// Shared visual tokens so every panel uses the same rhythm, radius, and materials.
 enum Theme {
-    static let cornerRadius: CGFloat = 12
-    static let innerRadius: CGFloat = 8
-    static let cardPadding: CGFloat = 16
-    static let sectionSpacing: CGFloat = 18
+    static let cornerRadius: CGFloat = 16
+    static let innerRadius: CGFloat = 10
+    static let cardPadding: CGFloat = 20
+    static let sectionSpacing: CGFloat = 20
     static let contentMaxWidth: CGFloat = 980
+
+    static let accent = adaptive(light: 0x14745B, dark: 0x73D8B5)
+    static let canvas = adaptive(light: 0xF3F4F1, dark: 0x191D1C)
+    static let surface = adaptive(light: 0xFDFEFC, dark: 0x232826)
+    static let inset = adaptive(light: 0xF1F4F0, dark: 0x1B201E)
+    static let border = adaptive(light: 0xDDE3DD, dark: 0x39413C)
+
+    private static func adaptive(light: UInt32, dark: UInt32) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let value = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+            return NSColor(
+                red: CGFloat((value >> 16) & 0xff) / 255,
+                green: CGFloat((value >> 8) & 0xff) / 255,
+                blue: CGFloat(value & 0xff) / 255,
+                alpha: 1
+            )
+        })
+    }
 }
 
 /// A consistent container for every section in the main panel.
@@ -19,11 +37,12 @@ struct Card<Content: View>: View {
         content()
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Theme.cornerRadius))
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerRadius))
             .overlay {
                 RoundedRectangle(cornerRadius: Theme.cornerRadius)
-                    .stroke(.separator.opacity(0.45))
+                    .stroke(Theme.border.opacity(0.8), lineWidth: 1)
             }
+            .shadow(color: .black.opacity(0.025), radius: 8, y: 3)
     }
 }
 
@@ -47,8 +66,10 @@ struct SectionHeader<Trailing: View>: View {
         HStack(spacing: 8) {
             if let systemImage {
                 Image(systemName: systemImage)
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 28, height: 28)
+                    .background(Theme.accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
             }
             Text(title)
                 .font(.headline)
@@ -79,7 +100,7 @@ struct SettingBlock<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title)
-                .font(.caption)
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
@@ -98,12 +119,102 @@ struct StatusBadge: View {
     let status: DownloadStatus
 
     var body: some View {
-        Label(status.title, systemImage: status.systemImage)
+        Label(status.displayTitle, systemImage: status.systemImage)
             .font(.caption.weight(.medium))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(.thinMaterial, in: Capsule())
+            .foregroundStyle(status.tint)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(status.tint.opacity(0.09), in: Capsule())
+            .help(status.title)
+    }
+}
+
+/// A calm introduction that makes each workspace's purpose clear.
+struct PageHeading: View {
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 28, weight: .bold, design: .rounded))
+                .tracking(-0.5)
+            Text(subtitle)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.bottom, 2)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+struct EmptyState: View {
+    let title: String
+    let message: String
+    let systemImage: String
+    var compact = false
+
+    var body: some View {
+        Group {
+            if compact {
+                HStack(spacing: 16) {
+                    icon
+                    copy(alignment: .leading)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                VStack(spacing: 12) {
+                    icon
+                    copy(alignment: .center)
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(.vertical, compact ? 12 : 24)
+        .padding(.horizontal, compact ? 0 : 16)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var icon: some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 25, weight: .light))
+            .foregroundStyle(Theme.accent)
+            .frame(width: 58, height: 58)
+            .background(Theme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private func copy(alignment: HorizontalAlignment) -> some View {
+        VStack(alignment: alignment, spacing: 5) {
+            Text(title).font(.headline)
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(compact ? .leading : .center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: compact ? nil : 360)
+        }
+    }
+}
+
+extension DownloadStatus {
+    /// Diagnostic details remain available through `title` and the activity log.
+    var displayTitle: String {
+        switch self {
+        case .ready: "Ready to download"
+        case .idle: "Ready when you are"
+        case .missingDependency: "Setup needed"
+        case .failed: "Needs attention"
+        default: title
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .ready, .succeeded, .running, .repairing: Theme.accent
+        case .missingDependency, .failed: .orange
+        default: .secondary
+        }
     }
 }
 
@@ -132,7 +243,9 @@ struct CoverView: View {
         .task(id: urlString) {
             image = CoverImageCache.shared.cachedImage(for: urlString)
             if image == nil {
-                image = await CoverImageCache.shared.image(for: urlString)
+                let loadedImage = await CoverImageCache.shared.image(for: urlString)
+                guard !Task.isCancelled else { return }
+                image = loadedImage
             }
         }
     }
@@ -140,9 +253,9 @@ struct CoverView: View {
     private var placeholder: some View {
         ZStack {
             Rectangle()
-                .fill(.quaternary)
+                .fill(Theme.inset)
             Image(systemName: "music.note")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.accent.opacity(0.7))
         }
     }
 }

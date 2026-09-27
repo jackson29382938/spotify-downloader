@@ -27,9 +27,11 @@ struct ContentView: View {
             SidebarView(viewModel: viewModel, selection: selectedSection)
         } detail: {
             detail(for: currentSection)
+                .background(Theme.canvas)
                 .navigationTitle(currentSection.title)
                 .toolbar { toolbarContent }
         }
+        .tint(Theme.accent)
         // Every label, status, and error in the window can be selected and copied.
         .textSelection(.enabled)
         .task {
@@ -43,25 +45,27 @@ struct ContentView: View {
     private func detail(for section: AppSection) -> some View {
         switch section {
         case .download:
-            Page(scrolls: false) {
+            Page {
+                PageHeading(title: "Your music, ready to go.", subtitle: "Save tracks, albums, and playlists to your library.")
                 DownloadComposerView(viewModel: viewModel)
                 QuickOptionsView()
                 if viewModel.progressSource == .download {
-                    ProgressPanelView(viewModel: viewModel, fillsHeight: true)
-                } else {
-                    Spacer(minLength: 0)
+                    ProgressPanelView(viewModel: viewModel)
                 }
             }
         case .queue:
-            Page(scrolls: false) {
-                QueuePanelView(viewModel: viewModel, fillsHeight: true)
+            Page {
+                PageHeading(title: "A look before you listen.", subtitle: "Review tracks and artwork before starting a download.")
+                QueuePanelView(viewModel: viewModel)
             }
         case .history:
             Page {
+                PageHeading(title: "Your recent downloads", subtitle: "Find finished sessions and jump back to their files.")
                 HistoryView(viewModel: viewModel)
             }
         case .library:
             Page {
+                PageHeading(title: "Care for your collection.", subtitle: "Refresh artwork, tidy metadata, and bring lyrics into your songs.")
                 LibraryRepairView(viewModel: viewModel)
                 EmbedLyricsView(viewModel: viewModel)
                 if viewModel.progressSource == .library {
@@ -70,6 +74,7 @@ struct ContentView: View {
             }
         case .diagnostics:
             Page {
+                PageHeading(title: "Everything behind the music", subtitle: "Check the downloader and review recent activity.")
                 DiagnosticsView(viewModel: viewModel)
                 ActivityLogView(viewModel: viewModel)
             }
@@ -96,10 +101,12 @@ struct ContentView: View {
                 .disabled(viewModel.activityLines.isEmpty)
             }
 
-            Button {
-                viewModel.copyDiagnostics()
-            } label: {
-                Label("Copy Diagnostics", systemImage: "doc.on.doc")
+            if currentSection == .diagnostics {
+                Button {
+                    viewModel.copyDiagnostics()
+                } label: {
+                    Label("Copy Diagnostics", systemImage: "doc.on.doc")
+                }
             }
 
             SettingsLink {
