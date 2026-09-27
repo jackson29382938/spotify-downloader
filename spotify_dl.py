@@ -3080,22 +3080,38 @@ def _has_embedded_cover(path: Path) -> bool:
     return False
 
 
-def iter_library_files(folders: list[str], recursive: bool) -> list[Path]:
-    paths: list[Path] = []
-    for folder in folders:
-        base = Path(folder).expanduser()
-        if not base.exists():
+def iter_library_files(selections: list[str], recursive: bool) -> list[Path]:
+    """Expand selected folders and audio files, processing overlaps only once."""
+    paths: dict[Path, Path] = {}
+    for selection in selections:
+        base = Path(selection).expanduser()
+        if base.is_file():
+            candidates = [base]
+        elif base.is_dir():
+            candidates = base.rglob("*") if recursive else base.glob("*")
+        else:
             continue
-        iterator = base.rglob("*") if recursive else base.glob("*")
-        for path in iterator:
+        for path in candidates:
             if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS:
-                paths.append(path)
-    return sorted(paths)
+                paths.setdefault(path.resolve(), path)
+    return sorted(paths.values())
 
 
 def repair_library(args: argparse.Namespace) -> int:
     json_events = getattr(args, "json_events", False)
     folders = list(args.folders)
+    if args.paths_file:
+        try:
+            saved = json.loads(Path(args.paths_file).read_text(encoding="utf-8"))
+            if not isinstance(saved, list) or not all(isinstance(path, str) for path in saved):
+                raise ValueError("selection file must contain a list of paths")
+            folders.extend(saved)
+        except (OSError, ValueError) as exc:
+            print(f"Could not read library selections: {exc}", file=sys.stderr, flush=True)
+            return 1
+    if not folders:
+        print("Choose at least one audio file or folder.", file=sys.stderr, flush=True)
+        return 1
     recursive = getattr(args, "recursive", True)
     apply = getattr(args, "apply", False)
     lyrics_enabled = getattr(args, "lyrics", True)
@@ -3107,7 +3123,7 @@ def repair_library(args: argparse.Namespace) -> int:
 
     files = iter_library_files(folders, recursive)
     total = len(files)
-    print(f"Scanning {total} audio file(s) in {len(folders)} folder(s).", flush=True)
+    print(f"Scanning {total} audio file(s) from {len(folders)} selection(s).", flush=True)
     emit_json_event(json_events, "collection_start", title="Library Cleanup", track_count=total, selected_count=total, total=total)
 
     ok = 0
@@ -3501,8 +3517,9 @@ def create_parser() -> argparse.ArgumentParser:
     health.add_argument("--json", action="store_true", help="Emit JSON (always on).")
     health.add_argument("--no-network", dest="probe_network", action="store_false", default=True, help="Skip network probes.")
 
-    library = subparsers.add_parser("library", help="Scan or repair an existing music library's metadata.")
-    library.add_argument("folders", nargs="+", help="Folders to scan.")
+    library = subparsers.add_parser("library", help="Scan or repair existing audio files and folders.")
+    library.add_argument("folders", nargs="*", help="Audio files or folders to scan.")
+    library.add_argument("--paths-file", help="JSON array of selected audio files or folders (used by the Mac app).")
     library.add_argument("--apply", action="store_true", help="Write metadata changes (otherwise scan only).")
     library.add_argument("--recursive", dest="recursive", action="store_true", default=True, help="Include subfolders.")
     library.add_argument("--no-recursive", dest="recursive", action="store_false", help="Do not include subfolders.")

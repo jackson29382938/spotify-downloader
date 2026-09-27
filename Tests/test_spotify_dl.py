@@ -227,6 +227,33 @@ class LyricsTests(unittest.TestCase):
 
 
 class LibraryRepairTests(unittest.TestCase):
+    def test_library_reads_selected_files_from_json_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            song = Path(tmp) / "Song.mp3"
+            song.write_bytes(b"audio")
+            selection_file = Path(tmp) / "selection.json"
+            selection_file.write_text(json.dumps([str(song)]), encoding="utf-8")
+            args = dl.parse_args(["library", "--paths-file", str(selection_file)])
+            output = io.StringIO()
+            with patch.object(dl, "identify_library_metadata", return_value=None), contextlib.redirect_stdout(output):
+                dl.repair_library(args)
+            self.assertIn("Scanning 1 audio file(s)", output.getvalue())
+
+    def test_library_selection_combines_files_and_folders_without_duplicates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            album = folder / "Album"
+            album.mkdir()
+            first = folder / "First.mp3"
+            second = album / "Second.m4a"
+            first.write_bytes(b"audio")
+            second.write_bytes(b"audio")
+            (album / "notes.txt").write_text("not audio")
+
+            selections = [str(first), str(album), str(folder), str(folder / "missing.mp3")]
+            self.assertEqual(dl.iter_library_files(selections, recursive=True), [second, first])
+            self.assertEqual(dl.iter_library_files(selections, recursive=False), [second, first])
+
     def test_title_alone_is_not_confident_enough_to_repair_metadata(self):
         guess = dl.LibraryTrackGuess(path=Path("Song.mp3"), title="Song", artist="")
         candidate = dl.LibraryMetadata(title="Song", artist="Wrong Artist", source="Apple Music")

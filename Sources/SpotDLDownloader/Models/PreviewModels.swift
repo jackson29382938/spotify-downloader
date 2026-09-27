@@ -99,6 +99,7 @@ enum ProgressItemState: String, Codable {
     case failed
     case skipped
     case paused
+    case stopped
     case cancelled
 
     var label: String {
@@ -115,6 +116,8 @@ enum ProgressItemState: String, Codable {
             "Skipped"
         case .paused:
             "Paused"
+        case .stopped:
+            "Stopped"
         case .cancelled:
             "Cancelled"
         }
@@ -134,6 +137,8 @@ enum ProgressItemState: String, Codable {
             "forward.end.fill"
         case .paused:
             "pause.circle.fill"
+        case .stopped:
+            "stop.circle.fill"
         case .cancelled:
             "stop.circle.fill"
         }
@@ -246,6 +251,7 @@ enum QueueItemState: String {
     case previewed
     case running
     case succeeded
+    case stopped
     case failed
 
     var label: String {
@@ -258,6 +264,8 @@ enum QueueItemState: String {
             "Running"
         case .succeeded:
             "Complete"
+        case .stopped:
+            "Stopped"
         case .failed:
             "Failed"
         }
@@ -273,6 +281,8 @@ enum QueueItemState: String {
             "arrow.down.circle.fill"
         case .succeeded:
             "checkmark.circle.fill"
+        case .stopped:
+            "stop.circle.fill"
         case .failed:
             "exclamationmark.triangle.fill"
         }

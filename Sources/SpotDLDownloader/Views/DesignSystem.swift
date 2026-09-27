@@ -290,7 +290,7 @@ func progressTint(for state: ProgressItemState) -> Color {
         .green
     case .failed:
         .orange
-    case .cancelled:
+    case .cancelled, .stopped:
         .secondary
     case .paused:
         .secondary

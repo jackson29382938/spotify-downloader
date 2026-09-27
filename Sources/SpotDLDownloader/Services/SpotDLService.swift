@@ -77,9 +77,11 @@ final class DownloadService {
         completion: @escaping (Int32) -> Void
     ) throws {
         let folderPaths = folders.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+        let selectionFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("spotify-downloader-library-\(UUID().uuidString).json")
+        try JSONEncoder().encode(folderPaths).write(to: selectionFile, options: .atomic)
         var arguments = ProjectPaths.downloaderInvocationPrefix
-            + ["library"]
-            + folderPaths
+            + ["library", "--paths-file", selectionFile.path]
             + ["--json-events", "--min-confidence", String(format: "%.2f", max(0, min(1, minConfidence)))]
 
         if apply {
@@ -103,7 +105,15 @@ final class DownloadService {
             arguments.append(contentsOf: ["--rename-pattern", renamePattern])
         }
 
-        try runStreaming(arguments: arguments, output: output, completion: completion)
+        do {
+            try runStreaming(arguments: arguments, output: output) { code in
+                try? FileManager.default.removeItem(at: selectionFile)
+                completion(code)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: selectionFile)
+            throw error
+        }
     }
 
     func embedLRCFiles(

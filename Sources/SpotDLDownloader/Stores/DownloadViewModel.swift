@@ -12,6 +12,7 @@ final class DownloadViewModel: ObservableObject {
     private enum DownloadStopAction {
         case none
         case pauseKeepCompleted
+        case stopKeepCompleted
         case cancelDeleteCompleted
     }
 
@@ -286,6 +287,10 @@ final class DownloadViewModel: ObservableObject {
                                 message: "Paused — press Download to resume"
                             )
                             self.finishRunningProgressItems(as: .paused, message: "Paused")
+                        case .stopKeepCompleted:
+                            self.status = .stopped
+                            self.finishRunningQueueItems(as: .stopped, message: "Stopped — completed files kept")
+                            self.finishRunningProgressItems(as: .stopped, message: "Stopped; completed files kept")
                         case .cancelDeleteCompleted:
                             let deletion = self.deleteCompletedFilesFromActiveRun()
                             self.status = .cancelled
@@ -424,9 +429,9 @@ final class DownloadViewModel: ObservableObject {
         minConfidence: Double,
         renamePattern: String? = nil
     ) {
-        let validFolders = folders.filter { FileManager.default.fileExists(atPath: $0) }
-        guard validFolders.isEmpty == false else {
-            errorMessage = "Choose at least one existing music library folder."
+        let validSelections = folders.filter { FileManager.default.fileExists(atPath: $0) }
+        guard validSelections.isEmpty == false else {
+            errorMessage = "Choose a local song, Music playlist or album, or folder."
             return
         }
 
@@ -437,14 +442,13 @@ final class DownloadViewModel: ObservableObject {
         progressSource = .library
         progressItems = []
         progressSummary = DownloadProgressSummary(title: apply ? "Applying Library Cleanup" : "Scanning Library")
-        let folderArgs = validFolders.map { "\"\($0)\"" }.joined(separator: " ")
-        lastCommand = "library \(apply ? "--apply " : "")\(folderArgs)"
+        lastCommand = "library \(apply ? "--apply " : "")\(validSelections.count) selected path\(validSelections.count == 1 ? "" : "s")"
         status = .repairing(startedAt: Date())
         appendLog("$ \(lastCommand)\n\n")
 
         do {
             try service.repairLibrary(
-                folders: validFolders,
+                folders: validSelections,
                 apply: apply,
                 recursive: recursive,
                 searchLyrics: searchLyrics,
@@ -581,6 +585,12 @@ final class DownloadViewModel: ObservableObject {
     func pauseAndKeepCompleted() {
         guard isDownloadRunning else { return }
         downloadStopAction = .pauseKeepCompleted
+        service.cancel()
+    }
+
+    func stopAndKeepCompleted() {
+        guard isDownloadRunning else { return }
+        downloadStopAction = .stopKeepCompleted
         service.cancel()
     }
 

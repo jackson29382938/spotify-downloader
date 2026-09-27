@@ -10,6 +10,7 @@ enum DownloadStatus: Equatable {
     case succeeded
     case failed(code: Int32)
     case paused
+    case stopped
     case cancelled
 
     var title: String {
@@ -32,6 +33,8 @@ enum DownloadStatus: Equatable {
             "Failed: exit \(code)"
         case .paused:
             "Paused"
+        case .stopped:
+            "Stopped"
         case .cancelled:
             "Cancelled"
         }
@@ -57,6 +60,8 @@ enum DownloadStatus: Equatable {
             "xmark.octagon.fill"
         case .paused:
             "pause.circle.fill"
+        case .stopped:
+            "stop.circle.fill"
         case .cancelled:
             "stop.circle.fill"
         }

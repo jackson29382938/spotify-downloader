@@ -35,8 +35,9 @@ full ledger and [NOTICE.md](NOTICE.md) for attribution.
 - Optional automatic import of completed MP3, M4A, and WAV downloads into an
   Apple Music playlist. If a playlist with exactly that name exists, songs are
   added to it (skipping ones already there) instead of creating a duplicate.
-- In-progress **Pause & Keep Completed** and **Cancel & Delete Completed**
-  controls. Paused playlist downloads resume without re-downloading completed tracks.
+- In-progress **Pause & Keep Completed**, **Stop & Keep Completed**, and
+  **Stop & Delete Completed** controls. Pause allows playlist downloads to resume
+  without re-downloading completed tracks; Stop ends the run.
 - Configurable failed-track retries (two additional attempts by default), with
   a different search route, YouTube client, and audio-stream preference each time.
 
@@ -47,8 +48,9 @@ The sidebar switches between pages:
 - **Download**: paste links, pick media/format/quality, and watch per-song progress.
 - **Preview Queue**: inspect detected tracks, artwork, and output folders before downloading.
 - **History**: past download sessions.
-- **Library Tools**: metadata cleanup, plus **Embed .lrc Lyrics** to move old
-  `.lrc` sidecar files into the songs themselves.
+- **Library Tools**: clean up selected Apple Music playlists, albums, individual
+  local songs, or folders. **Embed .lrc Lyrics** moves old `.lrc` sidecar files
+  into the songs themselves.
 - **Diagnostics**: helper health checks and the activity log.
 
 Everything else is in **Settings** (⌘,), grouped into General, Audio, Lyrics,
@@ -176,11 +178,15 @@ Check local helper diagnostics:
 python3 spotify_dl.py health --json
 ```
 
-Preview metadata cleanup for an existing music folder:
+Preview metadata cleanup for an existing music folder or audio file:
 
 ```bash
 python3 spotify_dl.py library "$HOME/Music" --json
 ```
+
+The app's Library Cleanup page can also select items from Apple Music. It
+processes local audio files in those selections; cloud-only tracks have no
+editable file and are excluded.
 
 Apply matched title, artist, album, genre, artwork, and lyrics updates:
 

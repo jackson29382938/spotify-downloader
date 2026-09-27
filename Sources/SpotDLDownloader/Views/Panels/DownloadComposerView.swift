@@ -102,11 +102,11 @@ struct DownloadComposerView: View {
             }
         }
         .confirmationDialog(
-            "Cancel this download and delete completed files?",
+            "Stop this download and delete completed files?",
             isPresented: $confirmDeleteCompleted,
             titleVisibility: .visible
         ) {
-            Button("Cancel & Delete Completed", role: .destructive) {
+            Button("Stop & Delete Completed", role: .destructive) {
                 viewModel.cancelAndDeleteCompleted()
             }
             Button("Keep Downloading", role: .cancel) {}
@@ -125,15 +125,21 @@ struct DownloadComposerView: View {
                         Label("Pause & Keep Completed", systemImage: "pause.fill")
                     }
 
+                    Button {
+                        viewModel.stopAndKeepCompleted()
+                    } label: {
+                        Label("Stop & Keep Completed", systemImage: "stop.fill")
+                    }
+
                     Divider()
 
                     Button(role: .destructive) {
                         confirmDeleteCompleted = true
                     } label: {
-                        Label("Cancel & Delete Completed", systemImage: "trash")
+                        Label("Stop & Delete Completed", systemImage: "trash")
                     }
                 } label: {
-                    Label("Pause / Cancel", systemImage: "pause.circle")
+                    Label("Pause / Stop", systemImage: "pause.circle")
                 }
             }
 

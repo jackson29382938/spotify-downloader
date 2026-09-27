@@ -54,6 +54,9 @@ struct ProgressPanelView: View {
     }
 
     private var summaryState: ProgressItemState {
+        if viewModel.status == .stopped {
+            return .stopped
+        }
         if viewModel.progressSummary.failed > 0 {
             return .failed
         }
