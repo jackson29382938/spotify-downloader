@@ -738,7 +738,9 @@ class PreviewHealthHistoryTests(unittest.TestCase):
         ):
             self.assertEqual(dl.main(["preview", "--json", "https://open.spotify.com/playlist/abc"]), 0)
 
-        self.assertEqual(len(json.loads(output.getvalue())["items"][0]["tracks"]), 2)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(len(payload["items"][0]["tracks"]), 2)
+        self.assertEqual(set(payload), {"generated_at", "items", "errors"})
 
     def test_preview_sources_returns_spotify_collection_payload(self):
         collection = dl.SpotifyCollection(
@@ -767,6 +769,7 @@ class PreviewHealthHistoryTests(unittest.TestCase):
             payload = dl.health_diagnostics(output_dir=tmp, probe_network=False)
 
         self.assertTrue(payload["ok"])
+        self.assertEqual(set(payload), {"ok", "generated_at", "python", "platform", "checks"})
         check_names = {check["name"] for check in payload["checks"]}
         self.assertIn("yt-dlp", check_names)
         self.assertIn("ffmpeg", check_names)

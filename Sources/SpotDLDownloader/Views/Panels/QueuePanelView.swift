@@ -19,12 +19,11 @@ struct QueuePanelView: View {
                 }
 
                 if viewModel.queueItems.isEmpty {
-                    Text("Preview links to inspect detected tracks, covers, output folders, and failures before downloading.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: Theme.innerRadius))
+                    EmptyState(
+                        title: "Your queue is clear",
+                        message: "Preview a link to inspect its tracks, artwork, output folder, and any issues before downloading.",
+                        systemImage: "list.bullet.rectangle"
+                    )
                 } else {
                     HStack(alignment: .top, spacing: 14) {
                         List(selection: $viewModel.selectedQueueItemID) {

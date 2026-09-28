@@ -23,7 +23,7 @@ struct DiagnosticsView: View {
                             Label(report.ok ? "Ready" : "Needs attention", systemImage: report.ok ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
                                 .foregroundStyle(report.ok ? .green : .orange)
                             Spacer()
-                            Text("Sunnify parity \(report.sunnifyParity)")
+                            Text("\(report.checks.count) checks")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

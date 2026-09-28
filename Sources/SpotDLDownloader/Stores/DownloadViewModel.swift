@@ -754,7 +754,6 @@ final class DownloadViewModel: ObservableObject {
             "Log folder: \(Defaults.logsPath)"
         ]
         if let healthReport {
-            lines.append("Sunnify parity: \(healthReport.sunnifyParity)")
             lines.append("Python: \(healthReport.python)")
             lines.append("Platform: \(healthReport.platform)")
             lines.append(contentsOf: healthReport.checks.map { "\($0.ok ? "OK" : "FAIL") \($0.name): \($0.detail)" })

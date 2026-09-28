@@ -2,13 +2,11 @@ import Foundation
 
 struct PreviewResponse: Decodable {
     let generatedAt: String
-    let sunnifyParity: String
     let items: [PreviewItem]
     let errors: [PreviewErrorItem]
 
     enum CodingKeys: String, CodingKey {
         case generatedAt = "generated_at"
-        case sunnifyParity = "sunnify_parity"
         case items
         case errors
     }
@@ -69,7 +67,6 @@ struct PreviewErrorItem: Decodable {
 struct HelperHealthReport: Decodable {
     let ok: Bool
     let generatedAt: String
-    let sunnifyParity: String
     let python: String
     let platform: String
     let checks: [HelperHealthCheck]
@@ -77,7 +74,6 @@ struct HelperHealthReport: Decodable {
     enum CodingKeys: String, CodingKey {
         case ok
         case generatedAt = "generated_at"
-        case sunnifyParity = "sunnify_parity"
         case python
         case platform
         case checks

@@ -9,13 +9,7 @@ Use this only with music you own, have permission to download, or are otherwise
 allowed to store locally. See [DISCLAIMER.md](DISCLAIMER.md) for the full local
 usage notice.
 
-## Full-history Sunnify parity
-
-This app keeps its native SwiftUI shell and Python downloader, but independently
-adopts the useful Sunnify behaviors that fit here, including pre-2.0 history and
-the `2.0.12` release line. The latest upstream review was against commit
-`29ae242` from June 24, 2026. See [SUNNIFY_PARITY.md](SUNNIFY_PARITY.md) for the
-full ledger and [NOTICE.md](NOTICE.md) for attribution.
+## Features
 
 - Spotify tracks, playlists, albums, locale URLs, and `spotify:` URIs.
 - Full-playlist fallback when Spotify's embed page exposes only the first page.

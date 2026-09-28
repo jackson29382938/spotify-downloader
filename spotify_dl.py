@@ -71,7 +71,6 @@ except ImportError:
     HAS_PILLOW = False
 
 
-SUNNIFY_PARITY = "1.0"
 
 SPOTIFY_RE = re.compile(
     r"(?:https?://open\.spotify\.com/(?:intl-[a-z]{2,}(?:-[a-z]{2,})?/)?"
@@ -2888,7 +2887,6 @@ def health_diagnostics(output_dir: str = "downloads", probe_network: bool = True
     return {
         "ok": ok,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "sunnify_parity": SUNNIFY_PARITY,
         "python": platform.python_version(),
         "platform": f"{platform.system()} {platform.release()} ({platform.machine()})",
         "checks": checks,
@@ -3828,7 +3826,6 @@ def main(argv: list[str] | None = None) -> int:
         items, errors = preview_sources(args.urls, media=args.media, output_dir=args.output_dir, save_snapshots=True)
         payload = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "sunnify_parity": SUNNIFY_PARITY,
             "items": items,
             "errors": errors,
         }

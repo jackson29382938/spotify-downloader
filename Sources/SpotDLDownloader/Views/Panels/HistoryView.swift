@@ -43,22 +43,22 @@ struct HistoryView: View {
 
                     if filteredEntries.isEmpty {
                         EmptyState(title: "No matching downloads", message: "Try a different link, folder name, or format.", systemImage: "magnifyingglass", compact: true)
-                    }
-
-                    VStack(spacing: 0) {
-                        ForEach(Array(filteredEntries.enumerated()), id: \.element.id) { index, entry in
-                            HistoryRow(entry: entry) {
-                                viewModel.revealHistoryEntry(entry)
-                            }
-                            if index < filteredEntries.count - 1 {
-                                Divider().padding(.leading, 12)
+                    } else {
+                        VStack(spacing: 0) {
+                            ForEach(Array(filteredEntries.enumerated()), id: \.element.id) { index, entry in
+                                HistoryRow(entry: entry) {
+                                    viewModel.revealHistoryEntry(entry)
+                                }
+                                if index < filteredEntries.count - 1 {
+                                    Divider().padding(.leading, 12)
+                                }
                             }
                         }
-                    }
-                    .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.innerRadius))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: Theme.innerRadius)
-                            .stroke(Theme.border)
+                        .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.innerRadius))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: Theme.innerRadius)
+                                .stroke(Theme.border)
+                        }
                     }
                 }
             }
