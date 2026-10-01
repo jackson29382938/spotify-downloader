@@ -21,6 +21,8 @@ has been security-reviewed.
 | Preview returned exit code zero when sources failed | Automation could mistake partial/total failure for success | Keep JSON errors and return nonzero; GUI also inspects per-source errors |
 | Discovery used extensionless paths on Windows | Locally installed/bundled FFmpeg and JS runtimes could be missed | Discover `.exe` paths; Windows-path regression |
 | Cancellation could keep queuing a playlist or advance to another source | Work could continue after a stop request | Check the shared stop event before queueing or advancing; single/multiple worker regressions |
+| Equal clock readings could count the same bot-check batch twice | Windows could exhaust retries too quickly | Treat requests at the cooldown boundary as already counted; deterministic zero/equal-clock regressions |
+| History failure test assumed `/proc` was unwritable | The test created a real folder on Windows and incorrectly failed | Use a temporary regular file as the parent to produce a real, portable write failure |
 
 ## Desktop architecture and controls
 
@@ -50,7 +52,7 @@ has been security-reviewed.
 
 ## Validation
 
-- Linux source suite: **121 passed, 1 skipped**. The skipped test requires native
+- Linux source suite: **122 passed, 1 skipped**. The skipped test requires native
   Windows Job Objects. Tests include existing backend regressions and Qt GUI /
   real subprocess integration checks.
 - Local helper diagnostics and dependency consistency checks passed.
@@ -66,6 +68,9 @@ has been security-reviewed.
 - Native Linux/Windows tests and ZIP builds are configured in
   `.github/workflows/desktop.yml`. Configuring CI is not evidence of a completed
   Windows build. macOS SwiftUI builds also remain unverified here.
+- The first native CI run passed on Linux. Windows reported two test failures:
+  the Linux-only history fixture and the equal-clock bot-check bug above. Both
+  are corrected; Windows readiness still requires a successful native CI rerun.
 
 ## Remaining limits
 

@@ -1145,11 +1145,15 @@ class ReviewFollowUpTests(unittest.TestCase):
             self.assertIn("resume list not updated", result.warning)
 
     def test_history_write_failure_is_only_a_warning(self):
-        with (
-            patch.object(dl, "history_path", return_value=Path("/proc/forbidden/history.jsonl")),
-            contextlib.redirect_stderr(io.StringIO()) as stderr,
-        ):
-            self.assertFalse(dl.append_history({"source_url": "x"}))
+        with tempfile.TemporaryDirectory() as tmp:
+            blocked_parent = Path(tmp) / "not-a-directory"
+            blocked_parent.write_text("existing file", encoding="utf-8")
+            with (
+                patch.object(dl, "history_path", return_value=blocked_parent / "history.jsonl"),
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+            ):
+                self.assertFalse(dl.append_history({"source_url": "x"}))
+            self.assertEqual(blocked_parent.read_text(encoding="utf-8"), "existing file")
         self.assertIn("history was not saved", stderr.getvalue())
 
     def test_yt_dlp_progress_bar_is_disabled_for_downloads(self):
@@ -1205,6 +1209,27 @@ class ReviewFollowUpTests(unittest.TestCase):
 
 
 class RateLimitTests(unittest.TestCase):
+    def test_equal_clock_readings_count_each_bot_check_batch_once(self):
+        for clock in (0.0, 100.0):
+            with self.subTest(clock=clock):
+                gate = dl.YouTubeGate(min_spacing=0, first_cooldown=0.05)
+                with (
+                    patch.object(dl.time, "monotonic", return_value=clock),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    first = gate.wait_turn()
+                    gate.report_bot_check(first)
+                    gate.report_bot_check(first)
+                self.assertEqual(gate.strikes, 1)
+                with (
+                    patch.object(dl.time, "monotonic", return_value=clock + 1.0),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    second = gate.wait_turn()
+                    gate.report_bot_check(second)
+                    gate.report_bot_check(second)
+                self.assertEqual(gate.strikes, 2)
+
     def test_gate_pauses_everyone_after_a_bot_check_then_gives_up(self):
         gate = dl.YouTubeGate(min_spacing=0, first_cooldown=0.05, give_up_after=2)
         with contextlib.redirect_stdout(io.StringIO()):

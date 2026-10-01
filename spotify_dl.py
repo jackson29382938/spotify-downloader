@@ -1765,7 +1765,7 @@ class YouTubeGate:
         self._lock = threading.Lock()
         self._next_start = 0.0
         self._cooldown_until = 0.0
-        self._cooldown_started = 0.0
+        self._cooldown_started: float | None = None
         self._cooldown = 0.0
         self.strikes = 0
         self.gave_up = False
@@ -1786,8 +1786,10 @@ class YouTubeGate:
 
     def report_bot_check(self, started_at: float) -> None:
         with self._lock:
-            if started_at < self._cooldown_started:
-                return  # this request began before the current pause; already counted
+            if self._cooldown_started is not None and started_at <= self._cooldown_started:
+                # Clock readings can be equal on Windows. A request started at
+                # the pause boundary also belongs to the batch already counted.
+                return
             now = time.monotonic()
             self.strikes += 1
             if self.strikes > self.give_up_after:
