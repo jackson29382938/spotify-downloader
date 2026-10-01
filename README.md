@@ -35,7 +35,20 @@ usage notice.
 - Configurable failed-track retries (two additional attempts by default), with
   a different search route, YouTube client, and audio-stream preference each time.
 
-## Mac App
+## Linux and Windows desktop app
+
+A cross-platform Qt interface is available alongside the native macOS app.
+It reuses the Python downloader for preview, audio/video downloads, progress,
+pause/resume, retries, diagnostics, history, and local library tools.
+See [DESKTOP.md](DESKTOP.md) for installation, testing, and portable builds.
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-desktop.txt
+.venv/bin/python desktop_app.py
+```
+
+## Native Mac App
 
 The sidebar switches between pages:
 

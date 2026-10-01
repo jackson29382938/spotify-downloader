@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import glob
 import hashlib
 import html
 import io
@@ -36,6 +37,7 @@ import signal
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from dataclasses import asdict, dataclass, field
@@ -349,7 +351,8 @@ def safe(name: str) -> str:
         return "Unknown"
     if cleaned.split(".")[0].upper() in RESERVED_DEVICE_NAMES:
         cleaned = f"_{cleaned}"
-    return cleaned
+    # Filesystems commonly cap a component at 255 bytes, not characters.
+    return cleaned.encode("utf-8")[:200].decode("utf-8", errors="ignore").rstrip(" .") or "Unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -873,20 +876,21 @@ def find_ffmpeg_location() -> str | None:
     if env_path and env_path.exists():
         return str(env_path)
 
-    installed = app_support_dir() / "bin" / "ffmpeg"
+    executable_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    installed = app_support_dir() / "bin" / executable_name
     if installed.exists():
         return str(installed)
 
     executable_dir = Path(sys.executable).resolve().parent
     for candidate in (
-        executable_dir.parent / "bin" / "ffmpeg",
-        executable_dir / "ffmpeg",
+        executable_dir.parent / "bin" / executable_name,
+        executable_dir / executable_name,
     ):
         if candidate.exists():
             return str(candidate)
 
     for candidate in (
-        Path.home() / ".spotdl" / "ffmpeg",
+        Path.home() / ".spotdl" / executable_name,
         Path("/opt/homebrew/bin/ffmpeg"),
         Path("/usr/local/bin/ffmpeg"),
     ):
@@ -1471,7 +1475,7 @@ def existing_output(output_dir: Path, stem: str, fmt: str) -> Path | None:
     direct = output_dir / f"{stem}.{fmt}"
     if direct.exists():
         return direct
-    for candidate in output_dir.glob(f"{stem}.*"):
+    for candidate in output_dir.glob(f"{glob.escape(stem)}.*"):
         if candidate.suffix.lower() == f".{fmt.lower()}":
             return candidate
     return None
@@ -1526,6 +1530,19 @@ def is_complete_audio(path: Path) -> bool:
     return audio is not None and length > 0
 
 
+def manifest_audio_path(output_dir: Path, file_name: str) -> Path | None:
+    """Resume files must remain direct children of their collection folder."""
+    if not file_name or file_name in {".", ".."} or any(char in file_name for char in ("/", "\\", "\x00")):
+        return None
+    path = output_dir / file_name
+    try:
+        if path.resolve().parent != output_dir.resolve():
+            return None
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return path
+
+
 def load_manifest(output_dir: Path) -> dict[str, Path]:
     completed: dict[str, Path] = {}
     for item in read_manifest_entries(output_dir):
@@ -1533,8 +1550,8 @@ def load_manifest(output_dir: Path) -> dict[str, Path]:
         file_name = item.get("file")
         if not isinstance(key, str) or not isinstance(file_name, str):
             continue
-        path = output_dir / file_name
-        if is_complete_audio(path):
+        path = manifest_audio_path(output_dir, file_name)
+        if path is not None and is_complete_audio(path):
             completed[key] = path
     return completed
 
@@ -1548,7 +1565,8 @@ def load_manifest_tracks(output_dir: Path, fmt: str) -> dict[tuple[str, int], Tr
         if not isinstance(key, str) or not isinstance(file_name, str) or not isinstance(metadata, dict):
             continue
         match = re.fullmatch(r"spotify:([A-Za-z0-9]+):(\d+)", key)
-        if not match or Path(file_name).suffix.lower() != f".{fmt}" or not is_complete_audio(output_dir / file_name):
+        path = manifest_audio_path(output_dir, file_name)
+        if not match or path is None or path.suffix.lower() != f".{fmt}" or not is_complete_audio(path):
             continue
         name, artists = metadata.get("name"), metadata.get("artists")
         if not isinstance(name, str) or not isinstance(artists, str):
@@ -1591,9 +1609,12 @@ def reserve_output_stem(output_dir: Path, stem: str, fmt: str, suffix: str | Non
         index = 2
         while f"{output_dir}:{candidate}.{fmt}" in IN_FLIGHT_STEMS or existing_output(output_dir, candidate, fmt):
             if suffix and index == 2:
-                candidate = safe(f"{stem} [{suffix}]")
+                tail = f" [{safe(suffix).encode('utf-8')[:80].decode('utf-8', errors='ignore')}]"
             else:
-                candidate = safe(f"{stem} ({index})")
+                tail = f" ({index})"
+            budget = 200 - len(tail.encode("utf-8"))
+            base = stem.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+            candidate = safe(f"{base}{tail}")
             index += 1
         IN_FLIGHT_STEMS.add(f"{output_dir}:{candidate}.{fmt}")
         return candidate
@@ -1824,11 +1845,12 @@ def js_runtime_candidates() -> list[tuple[str, Path]]:
     executable_dir = Path(sys.executable).resolve().parent
     candidates: list[tuple[str, Path]] = []
     for name in ("deno", "node", "bun"):
+        executable_name = f"{name}.exe" if os.name == "nt" else name
         env_value = os_environ(f"SPOTIFY_DOWNLOADER_{name.upper()}")
         if env_value:
             candidates.append((name, Path(env_value).expanduser()))
         candidates.extend(
-            (name, folder / name)
+            (name, folder / executable_name)
             for folder in (
                 app_support_dir() / "bin",
                 executable_dir,
@@ -2654,6 +2676,8 @@ def download_collection(
 
     if workers == 1:
         for index, track in selected_tracks:
+            if STOP_EVENT.is_set():
+                break
             print(f"  [{index}/{len(collection.tracks)}] {track.artists} - {track.name}", flush=True)
             _, _, result = run_one(index, track)
             handle_result(index, track, result)
@@ -2663,6 +2687,8 @@ def download_collection(
             futures = {}
 
             def queue_next() -> bool:
+                if STOP_EVENT.is_set():
+                    return False
                 try:
                     index, track = next(selected)
                 except StopIteration:
@@ -2862,9 +2888,8 @@ def health_diagnostics(output_dir: str = "downloads", probe_network: bool = True
     detail = ""
     try:
         folder.mkdir(parents=True, exist_ok=True)
-        probe = folder / ".spotify-downloader-write-test"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink(missing_ok=True)
+        with tempfile.NamedTemporaryFile(dir=folder, prefix=".spotify-downloader-write-test-", mode="w", encoding="utf-8") as probe:
+            probe.write("ok")
         writable = True
         detail = str(folder)
     except Exception as exc:
@@ -2877,11 +2902,13 @@ def health_diagnostics(output_dir: str = "downloads", probe_network: bool = True
     if probe_network:
         try:
             response = req.get("https://open.spotify.com/", headers={"User-Agent": USER_AGENT}, timeout=10)
-            add("Spotify reachable", response.status_code < 500, f"HTTP {response.status_code}")
+            add("Spotify reachable", response.status_code < 400, f"HTTP {response.status_code}")
         except Exception as exc:
             add("Spotify reachable", False, str(exc))
 
-    required = {"yt-dlp", "ffmpeg", "output folder", "mutagen"}
+    required = {"yt-dlp", "ffmpeg", "output folder", "mutagen", "JavaScript runtime", "yt-dlp-ejs"}
+    if probe_network:
+        required.add("Spotify reachable")
     ok = all(check["ok"] for check in checks if check["name"] in required)
 
     return {
@@ -3660,6 +3687,8 @@ def run_download(args: argparse.Namespace) -> int:
         )
 
     for url_index, url in enumerate(args.urls, 1):
+        if STOP_EVENT.is_set():
+            return 130
         options.source_id = f"source{url_index}" if len(args.urls) > 1 else ""
         if is_spotify_url(url):
             if args.media == "video":
@@ -3830,7 +3859,7 @@ def main(argv: list[str] | None = None) -> int:
             "errors": errors,
         }
         print(json.dumps(payload, ensure_ascii=False), flush=True)
-        return 0
+        return 1 if errors else 0
 
     if args.command == "health":
         payload = health_diagnostics(output_dir=args.output_dir, probe_network=getattr(args, "probe_network", True))

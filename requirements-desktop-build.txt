@@ -1,0 +1,4 @@
+-r requirements-desktop.txt
+-r requirements-build.txt
+pytest>=8,<10
+pytest-qt>=4.4,<5
