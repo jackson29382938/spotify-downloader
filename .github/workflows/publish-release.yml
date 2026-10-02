@@ -1,0 +1,38 @@
+name: Publish verified release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish
+        required: true
+        default: v1.1.0
+      run_id:
+        description: Successful Desktop builds run for the exact tagged commit
+        required: true
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: publish-release-${{ inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      BUILD_RUN_ID: ${{ inputs.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify native CI and release tag
+        run: python script/publish_release.py verify --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --run-id "$BUILD_RUN_ID"
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.run_id }}
+          path: release-assets
+      - name: Verify assets, upload and publish
+        run: python script/publish_release.py publish --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --run-id "$BUILD_RUN_ID" --artifacts release-assets

@@ -77,3 +77,18 @@ executable alone would not make its dependent libraries portable. Local Mac
 builds retain the existing optional FFmpeg bundling behavior.
 
 A Linux build does not validate the Windows or SwiftUI app.
+
+## Publish a verified release
+
+Create an annotated version tag at a commit whose **Desktop builds** run passed
+on all three platforms. Run **Publish verified release** in GitHub Actions with
+that tag and the successful build run ID. The publisher checks that the tag,
+`VERSION`, CI commit, required native jobs and archive versions match. It uploads
+the three native ZIPs plus `SHA256SUMS`, verifies GitHub's uploaded SHA-256
+digests, and only then publishes the draft release. It refuses failed/mismatched
+builds or changes to an already-published release with different assets.
+
+The publisher uses the runner's repository token; no extra credential is needed.
+This also supports publication when a cloud task's upload proxy cannot forward
+GitHub binary asset requests correctly. The current Mac download targets Apple
+Silicon; Intel Macs can build the native app from source.
