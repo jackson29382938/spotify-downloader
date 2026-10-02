@@ -4,6 +4,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+permissions:
+  contents: read
 jobs:
   desktop:
     strategy:
@@ -39,3 +41,41 @@ jobs:
         with:
           name: desktop-${{ runner.os }}
           path: dist/SpotifyDownloader-*.zip
+          if-no-files-found: error
+  macos:
+    runs-on: macos-15
+    env:
+      QT_QPA_PLATFORM: offscreen
+      BUNDLE_FFMPEG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: 'requirements*.txt'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install FFmpeg
+        run: brew install ffmpeg
+      - name: Install dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install -r requirements-desktop-build.txt
+      - name: Python and Qt tests
+        run: .venv/bin/python -m pytest -q Tests
+      - name: Swift tests
+        run: swift test
+      - name: Build native macOS app and ZIP
+        run: ./script/build_and_run.sh --package
+      - name: Verify native bundle and packaged helper
+        run: |
+          codesign --verify --deep --strict 'dist/Spotify Downloader.app'
+          plutil -lint 'dist/Spotify Downloader.app/Contents/Info.plist'
+          'dist/Spotify Downloader.app/Contents/Resources/downloader/spotify_dl' health --json --no-network -o "$RUNNER_TEMP/spotify-health"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macOS
+          path: dist/Spotify-Downloader-*-macOS-*.zip
+          if-no-files-found: error

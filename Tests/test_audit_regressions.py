@@ -29,7 +29,8 @@ def test_existing_output_does_not_treat_title_as_glob(tmp_path):
     assert dl.existing_output(tmp_path, "Song [1]", "mp3") is None
     expected = tmp_path / "Song [1].MP3"
     expected.touch()
-    assert dl.existing_output(tmp_path, "Song [1]", "mp3") == expected
+    found = dl.existing_output(tmp_path, "Song [1]", "mp3")
+    assert found is not None and found.samefile(expected)
 
 
 @pytest.mark.parametrize("file_name", ["../outside.mp3", "/tmp/outside.mp3", "..\\outside.mp3", "C:\\outside.mp3", "\x00bad.mp3"])

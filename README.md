@@ -5,6 +5,9 @@ Spotify embed metadata for tracks/playlists, searches YouTube with `yt-dlp`,
 downloads audio, and writes local metadata when `mutagen` is available. It can
 also download direct YouTube video URLs as MP4 files.
 
+Linux and Windows desktop apps are also available. Portable downloads are
+published on the [GitHub releases page](https://github.com/jackson29382938/spotify-downloader/releases).
+
 Use this only with music you own, have permission to download, or are otherwise
 allowed to store locally. See [DISCLAIMER.md](DISCLAIMER.md) for the full local
 usage notice.
@@ -113,7 +116,7 @@ To build a zip that preserves the app bundle:
 That creates:
 
 ```text
-dist/Spotify Downloader Portable.zip
+dist/Spotify-Downloader-1.1.0-macOS-<architecture>.zip
 ```
 
 ## Setup

@@ -56,7 +56,8 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python desktop_app.py --smoke-test
 On Windows use `.\.venv\Scripts\python.exe` and set
 `$env:QT_QPA_PLATFORM="offscreen"` for headless tests.
 
-The build creates `dist/SpotifyDownloader/` and a platform-specific ZIP. Extract
+The build reads `VERSION` and creates `dist/SpotifyDownloader/` and a versioned
+platform-specific ZIP (for example `SpotifyDownloader-1.1.0-Linux-x86_64.zip`). Extract
 the entire folder and launch `SpotifyDownloader` (Linux) or
 `SpotifyDownloader.exe` (Windows). Keep `helper/` and `_internal/` alongside the
 launcher. Python and Qt are bundled; FFmpeg and Node/Deno remain external
@@ -66,7 +67,13 @@ installers. Windows can display an unknown-publisher warning.
 The build script tests the actual packaged GUI-to-helper path with local
 diagnostics before making the ZIP. It records exact installed dependencies in
 `build-info.json`. `.github/workflows/desktop.yml` runs tests and native builds on
-Linux and Windows and uploads ZIP artifacts; it does not publish releases.
+Linux and Windows and uploads ZIP artifacts; it also compiles/tests the native
+Swift app on macOS and verifies its packaged helper. It does not publish releases.
 
 The native SwiftUI app and its existing `script/build_and_run.sh` remain available
-on macOS 14+. A Linux build does not validate the Windows or SwiftUI app.
+on macOS 14+. The script reads the same `VERSION` file. CI and release builds set
+`BUNDLE_FFMPEG=0` and require FFmpeg on the destination Mac; copying a Homebrew
+executable alone would not make its dependent libraries portable. Local Mac
+builds retain the existing optional FFmpeg bundling behavior.
+
+A Linux build does not validate the Windows or SwiftUI app.

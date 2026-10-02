@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,9 @@ def main():
     parser.add_argument("--package", action="store_true", help="Create a portable ZIP")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
+    version = (root / "VERSION").read_text(encoding="utf-8").strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise ValueError("VERSION must contain a numeric major.minor.patch version")
     work = root / ".build" / "desktop"
     dist = root / "dist"
     gui = dist / "SpotifyDownloader"
@@ -30,17 +34,17 @@ def main():
     # On macOS the Qt executable also lives here; this portable folder is the
     # supported output, while the existing SwiftUI build retains its own app bundle.
     shutil.copytree(work / "helper-dist" / "spotify-helper", gui / "helper", dirs_exist_ok=True)
-    for name in ("DISCLAIMER.md", "DESKTOP.md"):
+    for name in ("DISCLAIMER.md", "DESKTOP.md", "VERSION"):
         shutil.copy2(root / name, gui / name)
     versions = subprocess.check_output([sys.executable, "-m", "pip", "freeze"], text=True)
-    (gui / "build-info.json").write_text(json.dumps({"platform": platform.platform(),
+    (gui / "build-info.json").write_text(json.dumps({"version": version, "platform": platform.platform(),
         "python": platform.python_version(), "dependencies": versions.splitlines()}, indent=2), encoding="utf-8")
     executable = gui / ("SpotifyDownloader.exe" if os.name == "nt" else "SpotifyDownloader")
     environment = os.environ.copy()
     environment["QT_QPA_PLATFORM"] = "offscreen"
     subprocess.run([str(executable), "--smoke-test"], env=environment, cwd=gui, check=True, timeout=60)
     if args.package:
-        archive = shutil.make_archive(str(dist / f"SpotifyDownloader-{platform.system()}-{platform.machine()}"),
+        archive = shutil.make_archive(str(dist / f"SpotifyDownloader-{version}-{platform.system()}-{platform.machine()}"),
                                       "zip", dist, gui.name)
         print(f"Package: {archive}")
     print(f"Verified application: {executable}")

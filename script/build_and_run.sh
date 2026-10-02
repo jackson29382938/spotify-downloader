@@ -6,9 +6,14 @@ APP_NAME="SpotDLDownloader"
 BUNDLE_NAME="Spotify Downloader"
 BUNDLE_ID="local.spotify.downloader"
 MIN_SYSTEM_VERSION="14.0"
-APP_VERSION="1.0.0"
+BUNDLE_FFMPEG="${BUNDLE_FFMPEG:-1}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+APP_VERSION="$(tr -d '\r\n' < "$ROOT_DIR/VERSION")"
+if [[ ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "VERSION must contain a numeric major.minor.patch version" >&2
+  exit 2
+fi
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$BUNDLE_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
@@ -19,7 +24,7 @@ APP_DOWNLOADER="$APP_RESOURCES/downloader"
 APP_RESOURCE_BIN="$APP_RESOURCES/bin"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
-PACKAGE_ZIP="$DIST_DIR/Spotify Downloader Portable.zip"
+PACKAGE_ZIP="$DIST_DIR/Spotify-Downloader-$APP_VERSION-macOS-$(uname -m).zip"
 PORTABLE_BUILD_DIR="$ROOT_DIR/.build/portable-downloader"
 PORTABLE_DOWNLOADER="$PORTABLE_BUILD_DIR/spotify_dl"
 PORTABLE_STAMP="$PORTABLE_BUILD_DIR/.build-inputs"
@@ -125,7 +130,9 @@ if [[ -z "$FFMPEG_SOURCE" || ! -x "$FFMPEG_SOURCE" ]]; then
   done
 fi
 
-if [[ -n "$FFMPEG_SOURCE" && -x "$FFMPEG_SOURCE" ]]; then
+if [[ "$BUNDLE_FFMPEG" == "0" ]]; then
+  echo "FFmpeg is external for this build; install it on the destination Mac."
+elif [[ -n "$FFMPEG_SOURCE" && -x "$FFMPEG_SOURCE" ]]; then
   cp "$FFMPEG_SOURCE" "$APP_RESOURCE_BIN/ffmpeg"
   chmod +x "$APP_RESOURCE_BIN/ffmpeg"
 else

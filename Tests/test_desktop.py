@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -248,6 +249,10 @@ def test_timeout_kills_helper_and_descendant(qtbot, tmp_path):
     assert "timed out" in result.args[1]
     child = records[0]["child"]
     def stopped():
+        if sys.platform != "linux":
+            # macOS has no /proc. Check the actual descendant's process state.
+            status = subprocess.run(["ps", "-p", str(child), "-o", "stat="], capture_output=True, text=True, check=False)
+            return not status.stdout.strip() or status.stdout.strip().startswith("Z")
         try:
             return Path(f"/proc/{child}/stat").read_text().split()[2] == "Z"
         except FileNotFoundError:
