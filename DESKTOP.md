@@ -57,7 +57,7 @@ On Windows use `.\.venv\Scripts\python.exe` and set
 `$env:QT_QPA_PLATFORM="offscreen"` for headless tests.
 
 The build reads `VERSION` and creates `dist/SpotifyDownloader/` and a versioned
-platform-specific ZIP (for example `SpotifyDownloader-1.1.0-Linux-x86_64.zip`). Extract
+platform-specific ZIP (for example `SpotifyDownloader-1.2.0-Linux-x86_64.zip`). Extract
 the entire folder and launch `SpotifyDownloader` (Linux) or
 `SpotifyDownloader.exe` (Windows). Keep `helper/` and `_internal/` alongside the
 launcher. Python and Qt are bundled; FFmpeg and Node/Deno remain external
@@ -92,3 +92,22 @@ The publisher uses the runner's repository token; no extra credential is needed.
 This also supports publication when a cloud task's upload proxy cannot forward
 GitHub binary asset requests correctly. The current Mac download targets Apple
 Silicon; Intel Macs can build the native app from source.
+
+## Queue recovery and match details (1.2.0)
+
+The Linux/Windows Qt app saves an unfinished queue before starting a download.
+After restarting, press Resume to use the original links, folder and options;
+completed files are skipped. Closing an active download keeps the queue, while
+Stop deliberately discards it. Successful completion clears it. Failed or
+interrupted jobs remain recoverable. An unfinished file can restart.
+
+Saved queues are local application settings and include source links and output
+paths. Browser cookie selections are not saved; choose them again for a new
+Download if authentication is needed. Recovery never starts downloads automatically.
+This queue recovery feature applies to the Qt application, not the native SwiftUI app.
+
+Diagnostics now records each selected YouTube title, URL, duration and matching
+reason before its download begins. This is an explanation of the automatic match,
+not a manual approval step. Spotify metadata Preview does not search YouTube.
+Local checks provide FFmpeg and JavaScript runtime installation advice for the
+current operating system. Restart the app after installing those dependencies.

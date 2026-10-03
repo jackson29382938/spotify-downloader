@@ -5,7 +5,7 @@ on:
       tag:
         description: Existing version tag to publish
         required: true
-        default: v1.1.0
+        default: v1.2.0
       run_id:
         description: Successful Desktop builds run for the exact tagged commit
         required: true

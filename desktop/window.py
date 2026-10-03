@@ -1,5 +1,5 @@
 """Qt desktop interface. Long-running work belongs exclusively to the helper."""
-from dataclasses import replace
+from dataclasses import asdict, replace
 import json
 from pathlib import Path
 
@@ -40,6 +40,7 @@ class MainWindow(QMainWindow):
         self.failed_urls = []
         self.resume_job = None
         self.last_job = None
+        self.discard_job = False
         self.pause_requested = False
         self.protocol_failed = False
         self.received_payload = False
@@ -183,6 +184,12 @@ class MainWindow(QMainWindow):
         self._button("Check network too", lambda: self._health(True), row)
         self._button("Copy activity", self._copy_activity, row, action=False)
         layout.addLayout(row)
+        advice = QLabel("Missing FFmpeg or a JavaScript runtime? Run Local checks for installation instructions for your operating system. Restart the app after installing them.")
+        advice.setWordWrap(True)
+        layout.addWidget(advice)
+        self.matches = table(["Track", "Selected YouTube result", "Duration", "Reason / URL"])
+        self.matches.setMaximumHeight(180)
+        layout.addWidget(self.matches)
         self.checks = table(["Check", "Result", "Details"])
         self.checks.setMaximumHeight(250)
         layout.addWidget(self.checks)
@@ -198,6 +205,37 @@ class MainWindow(QMainWindow):
             value = self.settings.value(name, widget.currentText())
             if widget.findText(value) >= 0:
                 widget.setCurrentText(value)
+
+        saved = self.settings.value("pending_job", "")
+        if saved:
+            try:
+                if not isinstance(saved, str) or len(saved) > 1024 * 1024:
+                    raise ValueError("Saved queue is too large")
+                payload = json.loads(saved)
+                if payload.get("version") != 1:
+                    raise ValueError("Unsupported saved queue version")
+                options = DownloadOptions(**payload["options"])
+                urls = payload["urls"]
+                if not isinstance(urls, list) or not urls or not all(isinstance(url, str) for url in urls):
+                    raise ValueError("Invalid saved links")
+                options.arguments(urls)
+                self.resume_job = (replace(options, overwrite="skip", cookies=""), urls)
+                self.urls.setPlainText("\n".join(urls))
+                self.output.setText(options.output)
+                self.status.setText("An unfinished queue was recovered. Resume skips completed files. Browser cookies must be selected again for a new download.")
+            except (ValueError, TypeError, KeyError, AttributeError):
+                self.settings.remove("pending_job")
+                self.status.setText("The saved queue could not be read. Paste your links to start again.")
+
+    def _persist_job(self, job):
+        if job:
+            options, urls = job
+            # Browser session choices are deliberately not persisted.
+            payload = {"version": 1, "options": asdict(replace(options, cookies="", overwrite="skip")), "urls": urls}
+            self.settings.setValue("pending_job", json.dumps(payload))
+        else:
+            self.settings.remove("pending_job")
+        self.settings.sync()
 
     def _save(self):
         self.settings.setValue("output", self.output.text())
@@ -244,10 +282,13 @@ class MainWindow(QMainWindow):
         if self.runner.busy:
             return
         self.operation = operation
+        self.discard_job = False
         self.pause_requested = False
         self.protocol_failed = False
         self.received_payload = False
         self.queue.setRowCount(0)
+        if operation == "download":
+            self.matches.setRowCount(0)
         self.rows.clear()
         self.track_states.clear()
         self.progress.setRange(0, 0)
@@ -271,6 +312,7 @@ class MainWindow(QMainWindow):
             self.last_job = (options, urls)
             self.resume_job = None
             self.failed_urls.clear()
+            self._persist_job(self.last_job)
         self._start("preview" if preview else "download", args, 120000 if preview else 0)
 
     def _pause(self):
@@ -282,8 +324,11 @@ class MainWindow(QMainWindow):
             self.stop_button.setEnabled(False)
 
     def _stop(self):
+        self.discard_job = True
         self.pause_requested = False
-        self.resume_job = None
+        if self.operation == "download":
+            self.resume_job = None
+            self._persist_job(None)
         self.runner.cancel()
         self.pause_button.setEnabled(False)
         self.stop_button.setEnabled(False)
@@ -295,6 +340,7 @@ class MainWindow(QMainWindow):
         self.resume_job = None
         self.last_job = (replace(options, overwrite="skip"), urls)
         self.failed_urls.clear()
+        self._persist_job(self.last_job)
         self._start("download", self.last_job[0].arguments(urls))
 
     def _retry(self):
@@ -304,6 +350,7 @@ class MainWindow(QMainWindow):
         options = replace(self.last_job[0], overwrite="skip")
         self.last_job = (options, urls)
         self.failed_urls.clear()
+        self._persist_job(self.last_job)
         self._start("download", options.arguments(urls))
 
     def _health(self, network):
@@ -355,6 +402,15 @@ class MainWindow(QMainWindow):
                 self._set_row(self.checks, self.checks.rowCount(), [check.get("name", ""), "Passed" if check.get("ok") else "Failed", check.get("detail", "")])
             self.protocol_failed = any(not check.get("ok") for check in record["checks"])
             self._log(json.dumps(record, ensure_ascii=False))
+        elif record.get("event") == "match_selected":
+            duration = record.get("candidate_duration")
+            expected = record.get("expected_duration")
+            details = f"{record.get('reason', '')}\n{record.get('candidate_url', '')}"
+            self._set_row(self.matches, self.matches.rowCount(), [
+                f"{record.get('artists', '')} — {record.get('title', '')}",
+                record.get("candidate_title", ""),
+                f"{duration if duration is not None else '?'}s / expected {expected if expected is not None else '?'}s", details])
+            self._log(f"Selected match: {record.get('candidate_title', '')} — {details}")
         elif record.get("event") == "track_progress":
             self.received_payload = True
             key = str(record.get("key", record.get("label", "unknown")))
@@ -392,6 +448,19 @@ class MainWindow(QMainWindow):
             self.progress.setRange(0, 100)
             self.progress.setValue(100 if code == 0 and not reason and not self.protocol_failed and self.received_payload else 0)
         self._log(f"{self.operation} exited with code {code}" + (f": {reason}" if reason else ""))
+        if self.operation == "download" and self.last_job:
+            if self.discard_job:
+                self.resume_job = None
+                self._persist_job(None)
+            elif self.pause_requested:
+                self._persist_job(self.resume_job)
+            elif code or reason or self.protocol_failed or not self.received_payload:
+                # An interrupted helper or failed source remains recoverable.
+                self.resume_job = self.last_job
+                self._persist_job(self.resume_job)
+            else:
+                self.resume_job = None
+                self._persist_job(None)
         self._busy(False)
         self._refresh_history()
 
@@ -439,7 +508,10 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.question(self, "Download running", "Stop the current operation and keep completed files?")
             if answer == QMessageBox.StandardButton.Yes:
                 self.runner.completed.connect(lambda *_: self.close())
-                self._stop()
+                if self.operation == "download":
+                    self._pause()
+                else:
+                    self._stop()
             event.ignore()
             return
         self._save()

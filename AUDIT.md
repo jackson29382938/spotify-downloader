@@ -91,3 +91,28 @@ inputs beyond the added path checks, not a hardened remote multi-user service.
 Portable bundles are unsigned, need a compatible native OS, and require FFmpeg
 and Node/Deno on PATH. Native Windows CI and macOS checks, actual display sessions,
 and authorized end-to-end downloads are outstanding release validation.
+
+## 1.2.0 follow-up
+
+Reviewed Qt queue persistence against interruption, restart, successful completion,
+failed downloads, explicit stop, closing an active operation and cancellation of
+unrelated diagnostics. Queue recovery is schema-validated, limited to 1 MiB,
+never auto-started and always skips existing completed files. Local settings
+contain links and output paths; browser cookie choices are omitted. Damaged
+settings are discarded with a visible explanation. Native SwiftUI queue recovery
+is unchanged.
+
+Selected-match events now expose the candidate title, URL, duration and selection
+reason before transfer. Qt displays those in Diagnostics; this does not add a
+manual candidate approval step. CLI and shared-helper diagnostics offer dependency
+installation instructions for the destination OS.
+
+The generated-audio integration test uses a local HTTP server and real yt-dlp,
+FFmpeg, Mutagen and manifest logic. It verifies MP3 duration/tags and that a second
+run preserves the completed file. External YouTube candidate search alone is
+substituted with the controlled local fixture. This proves local transfer and
+processing, not live YouTube authentication or real Apple Music library access.
+
+Signing/notarization requires the owner's signing identities and certificates;
+none are configured in the managed cloud. Releases remain unsigned/ad-hoc signed.
+Intel Mac release packaging remains a future addition; source builds are available.

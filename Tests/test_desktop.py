@@ -303,3 +303,95 @@ def test_cancelled_playlist_does_not_queue_tracks(tmp_path, workers):
         download.assert_not_called()
     finally:
         dl.STOP_EVENT.clear()
+
+
+def test_queue_survives_restart_without_auto_start_or_cookies(window, qtbot):
+    window.cookies.setCurrentIndex(window.cookies.findData("firefox"))
+    window._download(False)
+    saved = json.loads(window.settings.value("pending_job"))
+    assert saved["options"]["cookies"] == ""
+    runner = FakeRunner()
+    recovered = MainWindow(runner, window.settings)
+    qtbot.addWidget(recovered)
+    assert runner.calls == []
+    assert recovered.resume_button.isEnabled()
+    recovered._resume()
+    args = dl.parse_args(runner.calls[-1][0])
+    assert args.urls == [URL]
+    assert args.overwrite == "skip"
+    assert args.cookies_browser is None
+    runner.finish(0)
+    recovered.close()
+
+
+def test_success_clears_saved_queue_but_failure_keeps_it(window):
+    window._download(False)
+    window.runner.record.emit({"event": "source_finished", "source_url": URL, "failed_count": 1})
+    window.runner.finish(1)
+    assert window.settings.value("pending_job")
+    assert window.resume_button.isEnabled()
+    window._resume()
+    window.runner.record.emit({"event": "source_finished", "source_url": URL, "failed_count": 0})
+    window.runner.finish()
+    assert window.settings.value("pending_job") is None
+    assert not window.resume_button.isEnabled()
+
+
+def test_explicit_stop_discards_recovery(window):
+    window._download(False)
+    window._stop()
+    window.runner.finish(130, window.runner.cancel_reason)
+    assert window.settings.value("pending_job") is None
+    assert not window.resume_button.isEnabled()
+
+
+@pytest.mark.parametrize("saved", ['{', '{"version": 99}', '{"version": 1, "options": {}, "urls": ["--evil"]}'])
+def test_corrupt_saved_queue_is_ignored(window, qtbot, saved):
+    window.settings.setValue("pending_job", saved)
+    recovered = MainWindow(FakeRunner(), window.settings)
+    qtbot.addWidget(recovered)
+    assert recovered.resume_job is None
+    assert recovered.settings.value("pending_job") is None
+    recovered.close()
+
+
+def test_selected_match_is_visible_with_reason_and_duration(window):
+    window._download(False)
+    window.runner.record.emit({"event": "match_selected", "title": "Song", "artists": "Artist",
+                              "candidate_title": "Artist — Song (official)", "candidate_duration": 181,
+                              "expected_duration": 180, "reason": "title and duration match",
+                              "candidate_url": "https://youtu.be/example"})
+    assert window.matches.rowCount() == 1
+    assert "181" in window.matches.item(0, 2).text()
+    assert "https://youtu.be/example" in window.matches.item(0, 3).text()
+
+
+def test_dependency_help_matches_destination_os():
+    with patch.object(dl.sys, "platform", "darwin"):
+        assert "brew install ffmpeg node" in dl.dependency_install_help()
+    with patch.object(dl.sys, "platform", "win32"), patch.object(dl.os, "name", "nt"):
+        assert "winget" in dl.dependency_install_help()
+    with patch.object(dl.sys, "platform", "linux"), patch.object(dl.os, "name", "posix"):
+        assert "sudo apt install ffmpeg" in dl.dependency_install_help()
+
+
+def test_stopping_diagnostics_preserves_paused_download(window):
+    window._download(False)
+    window._pause()
+    window.runner.finish(130, window.runner.cancel_reason)
+    saved = window.settings.value("pending_job")
+    window._health(False)
+    window._stop()
+    window.runner.finish(130, window.runner.cancel_reason)
+    assert window.settings.value("pending_job") == saved
+    assert window.resume_button.isEnabled()
+
+
+def test_closing_download_saves_recovery_queue(window):
+    from PySide6.QtWidgets import QMessageBox
+    window._download(False)
+    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+        window.close()
+    assert window.pause_requested
+    window.runner.finish(130, window.runner.cancel_reason)
+    assert window.settings.value("pending_job")

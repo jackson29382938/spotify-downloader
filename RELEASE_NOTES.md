@@ -1,50 +1,32 @@
-# Spotify Downloader 1.1.0
+# Spotify Downloader 1.2.0
 
-This release adds Linux and Windows desktop applications alongside the native
-macOS app. All use the shared Python downloader.
+Linux and Windows desktop queues now survive application restarts. Recovered
+queues wait for Resume and skip completed files using the original links, folder
+and options. Closing an active download retains its queue; Stop discards it.
+Failed jobs remain recoverable, and successful completion clears saved state.
+Browser cookie selections are not persisted.
 
-## New desktop applications
+Diagnostics records each automatic YouTube match's title, URL, duration and
+selection reason before downloading. Dependency checks now explain how to install
+FFmpeg and Node/Deno on the destination operating system, including Windows.
+These UI improvements apply to the Qt desktop application; the native Mac app
+receives the shared helper diagnostics and match events.
 
-- Metadata preview and audio/video downloads with per-track progress.
-- Pause/resume that keeps completed files, plus retry of failed sources.
-- Local diagnostics, download history, and library metadata/lyrics tools.
-- Portable ZIPs with Python and Qt bundled for Linux and Windows.
+A generated-media integration test exercises real yt-dlp transfer, FFmpeg MP3
+conversion, metadata tagging, manifest recording and completed-file skipping on
+all three native CI platforms. Queue recovery tests cover restart, failures,
+success, explicit stop and damaged settings.
 
-## Reliability and safety fixes
+## Installation and limitations
 
-- Bound Unicode filenames by bytes and preserve collision suffixes.
-- Escape filename glob characters and reject resume paths outside a collection.
-- Preserve existing files when diagnostics check output-folder writability.
-- Report preview failures and blocked network access accurately.
-- Discover Windows `.exe` runtimes and stop scheduling work after cancellation.
-- Prevent equal clock readings from counting a bot-check response twice.
-- Make history-write failure tests portable across operating systems.
+Extract the complete ZIP for your OS. Install FFmpeg and Node 22+ (or Deno 2+)
+separately and restart the application. On macOS: `brew install ffmpeg node`.
+The native Mac app requires macOS 14+ and the packaged Mac download supports Apple
+Silicon. Intel Macs can build from source. Linux/Windows bundles are unsigned;
+the Mac app is ad-hoc signed and is not Apple-notarized.
 
-## Installation
-
-Download the ZIP for your OS and processor architecture and extract it completely.
-For Linux/Windows, keep the helper and internal folders beside the launcher.
-See DESKTOP.md in the ZIP or repository for source installation and platform
-library requirements.
-
-FFmpeg and Node 22+ (or Deno 2+) must be installed separately and available on
-PATH on the destination machine. The macOS release intentionally does not bundle
-Homebrew's dynamically linked FFmpeg executable. On macOS, `brew install ffmpeg
-node` supplies those prerequisites; the native app requires macOS 14+.
-
-Linux/Windows bundles are unsigned. The native macOS app is ad-hoc signed, not
-Apple-notarized, so macOS can require explicit approval to open it. Apple Music
-automation is supported only by the native Mac app and requires local permission.
-
-## Validation and limitations
-
-Native CI runs the Python/Qt suite and packaged-helper checks on Linux and
-Windows. macOS CI runs the Python/Qt suite, Swift tests, app compilation, bundle
-signature checks and packaged-helper health checks. Release assets must come from
-one successful CI run for the release commit.
-
-Interactive desktop behavior, Apple Music integration against a real library,
-and authorized end-to-end downloads still need real-user validation. Preview
-does not use browser cookies. Matching is heuristic and external services can
-require authentication or rate-limit access. See AUDIT.md for the review scope
-and remaining limits.
+The generated-media test validates the local pipeline, not YouTube authentication,
+live service availability or Apple Music access. Those still require a real user
+session. Matching remains automatic and heuristic; Spotify Preview does not use
+browser cookies or preselect YouTube uploads. Completed files survive interruption,
+but partial files may restart. See DESKTOP.md for queue recovery and setup details.

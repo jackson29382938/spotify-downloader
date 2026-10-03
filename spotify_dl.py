@@ -2462,6 +2462,11 @@ def download_track(
                 # Every search route already ran; repeating them cannot help.
                 break
             LOG.info("selected %s for %s (%s)", chosen.get("id"), label, reason)
+            emit_json_event(options.json_events, "match_selected", key=key,
+                            title=working_track.name, artists=working_track.artists,
+                            candidate_title=chosen.get("title", ""), candidate_url=candidate_url(chosen),
+                            candidate_duration=chosen.get("duration"), expected_duration=duration_seconds(working_track),
+                            reason=reason)
 
         video_url = candidate_url(chosen)
         if not video_url:
@@ -2855,6 +2860,15 @@ def preview_sources(
     return items, errors
 
 
+def dependency_install_help() -> str:
+    """Advice for the destination OS, shared by CLI and desktop diagnostics."""
+    if sys.platform == "darwin":
+        return "Install FFmpeg and Node with Homebrew: brew install ffmpeg node. Restart the app afterward."
+    if os.name == "nt":
+        return "Install FFmpeg: winget install --id Gyan.FFmpeg --exact. Install Node 22+: winget install --id OpenJS.NodeJS.LTS --exact. Restart the app afterward."
+    return "On Debian/Ubuntu: sudo apt install ffmpeg. Install Node 22+ from https://nodejs.org or Deno 2+ from https://deno.com. Restart the app afterward."
+
+
 def health_diagnostics(output_dir: str = "downloads", probe_network: bool = True) -> dict:
     checks: list[dict] = []
 
@@ -2869,7 +2883,7 @@ def health_diagnostics(output_dir: str = "downloads", probe_network: bool = True
         add("yt-dlp", False, f"import failed: {exc}")
 
     ffmpeg = find_ffmpeg_location() or shutil.which("ffmpeg")
-    add("ffmpeg", bool(ffmpeg), ffmpeg or "not found; run ffmpeg-install or 'brew install ffmpeg'")
+    add("ffmpeg", bool(ffmpeg), ffmpeg or ("Not found. " + dependency_install_help()))
 
     runtimes = find_js_runtimes()
     add(
@@ -2877,7 +2891,7 @@ def health_diagnostics(output_dir: str = "downloads", probe_network: bool = True
         bool(runtimes),
         ", ".join(f"{name} ({config['path']})" for name, config in runtimes.items())
         if runtimes
-        else "missing; YouTube downloads may fail with HTTP 403. Run 'brew install deno'.",
+        else "Missing. " + dependency_install_help(),
     )
     ejs_ready = has_ejs_scripts()
     add("yt-dlp-ejs", ejs_ready, "ready" if ejs_ready else "missing; reinstall with pip install -r requirements.txt")
@@ -3547,8 +3561,7 @@ def doctor() -> int:
         print("Missing: " + ", ".join(missing), flush=True)
         print("Install with: python3 -m pip install -r requirements.txt", flush=True)
         if "ffmpeg" in missing:
-            print("Install ffmpeg with Homebrew: brew install ffmpeg", flush=True)
-            print("Or run: spotify_dl ffmpeg-install", flush=True)
+            print(dependency_install_help(), flush=True)
         return 1
 
     from yt_dlp.version import __version__ as yt_dlp_version
@@ -3559,7 +3572,7 @@ def doctor() -> int:
     if not HAS_PILLOW:
         print("Note: Pillow is missing, so artwork resizing is disabled.", flush=True)
     if not find_js_runtimes():
-        print("Warning: no JavaScript runtime found; YouTube may return HTTP 403. Install one with: brew install deno", flush=True)
+        print("Warning: no JavaScript runtime found. " + dependency_install_help(), flush=True)
     return 0
 
 

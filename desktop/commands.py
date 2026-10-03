@@ -44,6 +44,8 @@ class DownloadOptions:
             raise ValueError("Choose an output folder.")
         if self.media not in {"audio", "video"} or self.fmt not in {"mp3", "m4a", "flac", "opus", "ogg", "wav"}:
             raise ValueError("Invalid media or audio format.")
+        if self.bitrate not in {"128k", "192k", "256k", "320k", "0"}:
+            raise ValueError("Invalid audio quality.")
         if not 1 <= self.threads <= 16 or not 0 <= self.retries <= 5:
             raise ValueError("Invalid worker or retry count.")
         if self.overwrite not in {"skip", "metadata", "force"}:

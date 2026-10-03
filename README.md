@@ -116,7 +116,7 @@ To build a zip that preserves the app bundle:
 That creates:
 
 ```text
-dist/Spotify-Downloader-1.1.0-macOS-<architecture>.zip
+dist/Spotify-Downloader-1.2.0-macOS-<architecture>.zip
 ```
 
 ## Setup
@@ -266,3 +266,5 @@ Download history is appended to:
 ```text
 ~/Library/Application Support/Spotify Downloader/download-history.jsonl
 ```
+
+Desktop 1.2.0 adds restart-safe queues and selected-match details to the Linux/Windows app, plus OS-specific dependency guidance. See [DESKTOP.md](DESKTOP.md).
