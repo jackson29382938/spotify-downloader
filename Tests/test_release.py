@@ -90,3 +90,36 @@ def test_release_checks_uploaded_content_digest():
         release.verify_uploaded({"assets": [item]}, expected)
     item["digest"] = "sha256:" + "a" * 64
     release.verify_uploaded({"assets": [item]}, expected)
+
+
+def test_publish_uses_created_id_when_release_list_has_not_caught_up(monkeypatch, tmp_path):
+    monkeypatch.setattr(release, "verify_build", lambda *args: (SHA, "1.1.0"))
+    asset = tmp_path / "app.zip"
+    asset.write_bytes(b"test artifact")
+    monkeypatch.setattr(release, "verify_archives", lambda *args: [asset])
+    monkeypatch.setattr(release, "contents", lambda *args: "Release notes")
+    monkeypatch.setattr(release, "verify_uploaded", lambda *args: None)
+    state = {"draft": True}
+    queries = []
+    calls = []
+    def api(endpoint):
+        queries.append(endpoint)
+        if endpoint.endswith("?per_page=100"):
+            return []  # The list never exposes the draft during this test.
+        assert endpoint.endswith("/releases/123")
+        return {"id": 123, "draft": state["draft"], "html_url": "https://github.com/owner/repo/releases/tag/v1.1.0"}
+    def gh(*args):
+        calls.append(args)
+        if args[:2] == ("api", "repos/owner/repo/releases"):
+            body = json.loads(Path(args[-1]).read_text())
+            assert body["draft"] and body["target_commitish"] == SHA
+            return json.dumps({"id": 123, "draft": True, "tag_name": "v1.1.0"})
+        if args[:2] == ("release", "edit"):
+            state["draft"] = False
+        return ""
+    monkeypatch.setattr(release, "api", api)
+    monkeypatch.setattr(release, "gh", gh)
+    release.publish("owner/repo", "v1.1.0", 123, tmp_path)
+    assert queries.count("repos/owner/repo/releases?per_page=100") == 1
+    assert sum(args[:2] == ("release", "upload") for args in calls) == 2
+    assert not state["draft"]

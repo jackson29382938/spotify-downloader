@@ -129,9 +129,16 @@ def publish(repo, tag, run_id, folder):
             print(f"Already published and verified: {release['html_url']}")
             return
         if release is None:
-            gh("release", "create", tag, "--repo", repo, "--draft", "--verify-tag",
-               "--title", f"Spotify Downloader {version}", "--notes-file", str(notes))
-            release = next(item for item in api(f"repos/{repo}/releases?per_page=100") if item["tag_name"] == tag)
+            # Use the creation response directly: list endpoints can lag behind
+            # a newly created draft. The tag was already verified above.
+            request = Path(work) / "create-release.json"
+            request.write_text(json.dumps({"tag_name": tag, "target_commitish": commit,
+                                          "name": f"Spotify Downloader {version}",
+                                          "body": body, "draft": True}), encoding="utf-8")
+            release = json.loads(gh("api", f"repos/{repo}/releases", "--method", "POST",
+                                    "--input", str(request)))
+            if release.get("tag_name") != tag or not release.get("draft") or not release.get("id"):
+                raise ValueError("Release creation did not return the expected draft")
         for file in [*files, checksum]:
             if not api(f"repos/{repo}/releases/{release['id']}")["draft"]:
                 raise ValueError("Release was published during upload; refusing to modify it")
