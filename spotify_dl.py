@@ -13,7 +13,7 @@ The script exposes several subcommands consumed by the native macOS app:
     preview         Emit JSON describing the tracks a download would fetch.
     health          Emit a JSON diagnostics report.
     library         Scan/repair an existing music library's metadata.
-    embed-lrc       Move .lrc sidecar lyrics into the audio files themselves.
+    embed-lrc       Copy .lrc lyrics into audio tags while preserving timing.
     clean-lyrics    Strip timestamps from embedded lyrics (clean text for Apple Music).
     ffmpeg-install  Install ffmpeg with Homebrew on macOS.
 """
@@ -193,11 +193,11 @@ class Lyrics:
         return bool(self.plain or self.synced or self.enhanced)
 
     def text(self, style: str = "plain") -> str | None:
-        """Text for the standard lyrics tag: LRC timestamps only when asked for."""
+        """Return display text or LRC data for a sidecar."""
         if style == "synced" and (self.enhanced or self.synced):
             return self.enhanced or self.synced
         if self.plain:
-            return self.plain
+            return strip_lrc_timestamps(self.plain)
         return strip_lrc_timestamps(self.synced) if self.synced else None
 
     def synced_lines(self) -> list[tuple[str, int]]:
@@ -1154,16 +1154,20 @@ def embed_lyrics(path: Path, lyrics: Lyrics | None, style: str = "plain") -> boo
 
     Every supported format gets a standard lyrics tag (USLT, \xa9lyr, or
     LYRICS). MP3 also gets a SYLT frame with word timing when available, or
-    line timing otherwise. The "synced" style puts enhanced timestamped text
-    in the standard tag for players that read it; no sidecar is required.
+    line timing otherwise. The "synced" style also saves an LRC sidecar.
     """
     if not HAS_MUTAGEN or not lyrics:
         return False
-    text = lyrics.text(style)
+    text = lyrics.text()
     if not text:
         return False
 
     suffix = path.suffix.lower()
+    if suffix not in {".mp3", ".m4a", ".flac", ".opus", ".ogg"}:
+        return False
+    if style == "synced" and (timed := lyrics.enhanced or lyrics.synced):
+        if not path.with_suffix(".lrc").exists() and not write_lrc_sidecar(path, timed):
+            raise OSError(f"Could not save timed lyrics for {path.name}")
     if suffix == ".mp3":
         try:
             id3 = ID3(str(path))
@@ -1185,12 +1189,10 @@ def embed_lyrics(path: Path, lyrics: Lyrics | None, style: str = "plain") -> boo
         audio = FLAC(str(path))
         audio["lyrics"] = [text]
         audio.save()
-    elif suffix in {".opus", ".ogg"}:
+    else:
         audio = OggOpus(str(path)) if suffix == ".opus" else OggVorbis(str(path))
         audio["lyrics"] = [text]
         audio.save()
-    else:
-        return False
     return True
 
 
@@ -1244,7 +1246,7 @@ def strip_lrc_timestamps(synced: str) -> str:
 
 def parse_lrc(synced: str) -> list[tuple[str, int]]:
     """Return line or inline word timing as (text, milliseconds) pairs."""
-    lines: list[tuple[str, int]] = []
+    lines: list[tuple[str, int, bool]] = []
     for raw_line in synced.splitlines():
         stamps = list(LRC_TIMESTAMP_PARTS_RE.finditer(raw_line))
         if not stamps:
@@ -1254,17 +1256,20 @@ def parse_lrc(synced: str) -> list[tuple[str, int]]:
         if inline:
             prefix = text[:inline[0].start()]
             if prefix:
-                lines.append((prefix, timestamp_ms(stamps[0])))
+                lines.append((prefix, timestamp_ms(stamps[0]), True))
+            starts_line = not prefix
             for index, stamp in enumerate(inline):
                 end = inline[index + 1].start() if index + 1 < len(inline) else len(text)
                 segment = text[stamp.end():end]
                 if segment:
-                    lines.append((segment, timestamp_ms(stamp)))
+                    lines.append((segment, timestamp_ms(stamp), starts_line))
+                    starts_line = False
             continue
         for stamp in stamps:
-            lines.append((text, timestamp_ms(stamp)))
+            lines.append((text, timestamp_ms(stamp), True))
     lines.sort(key=lambda item: item[1])
-    return lines
+    return [("\n" + text if index and starts_line else text, at)
+            for index, (text, at, starts_line) in enumerate(lines)]
 
 
 def timestamp_ms(stamp: re.Match[str]) -> int:
@@ -2373,8 +2378,8 @@ def apply_track_lyrics(path: Path, track: Track, options: RunOptions) -> Lyrics 
     if not options.lyrics:
         return None
     lyrics = fetch_lyrics_payload(track)
-    if lyrics and lyrics.synced and options.write_lrc:
-        write_lrc_sidecar(path, lyrics.text("synced") or lyrics.synced)
+    if lyrics and options.write_lrc and (timed := lyrics.enhanced or lyrics.synced):
+        write_lrc_sidecar(path, timed)
     return lyrics
 
 
@@ -3376,7 +3381,7 @@ def clean_lyrics_timestamps(args: argparse.Namespace) -> int:
 
     Apple Music shows the lyrics tag as-is and cannot scroll lyrics for local
     files, so "[00:42.92] Ooh yeah" appears literally. The plain text goes
-    back into the lyrics tag; MP3 files keep the timing in a SYLT frame.
+    back into the lyrics tag. MP3s keep a SYLT frame and other formats keep an LRC file.
     """
     json_events = getattr(args, "json_events", False)
     files = [
@@ -3397,7 +3402,8 @@ def clean_lyrics_timestamps(args: argparse.Namespace) -> int:
         if not text or not LRC_TIMESTAMP_RE.search(text):
             continue
         try:
-            if not embed_lyrics(path, lyrics_from_lrc_text(text), "plain"):
+            style = "plain" if path.suffix.lower() == ".mp3" else "synced"
+            if not embed_lyrics(path, lyrics_from_lrc_text(text), style):
                 raise ValueError("format does not support embedded lyrics")
             cleaned += 1
             state, message = "succeeded", "Removed timestamps from lyrics"
@@ -3437,7 +3443,7 @@ def lrc_sidecar_pairs(folders: list[str], recursive: bool) -> list[tuple[Path, P
 
 
 def embed_lrc_sidecars(args: argparse.Namespace) -> int:
-    """Move lyrics from .lrc sidecar files into the audio files themselves."""
+    """Copy clean lyrics from .lrc files into audio tags and preserve timing."""
     json_events = getattr(args, "json_events", False)
     keep = getattr(args, "keep_lrc", False)
     style = getattr(args, "lyrics_style", "plain")
@@ -3456,10 +3462,11 @@ def embed_lrc_sidecars(args: argparse.Namespace) -> int:
             lyrics = lyrics_from_lrc_text(sidecar.read_text(encoding="utf-8", errors="replace"))
             if not embed_lyrics(audio, lyrics, style):
                 raise ValueError("format does not support embedded lyrics" if lyrics else "lyrics file is empty")
-            if not keep:
+            keep_sidecar = keep or style == "synced" or (lyrics.synced and audio.suffix.lower() != ".mp3")
+            if not keep_sidecar:
                 sidecar.unlink(missing_ok=True)
             ok += 1
-            state, message = "succeeded", "Embedded" if keep else "Embedded; removed .lrc"
+            state, message = "succeeded", "Embedded; kept .lrc" if keep_sidecar else "Embedded; removed .lrc"
         except Exception as exc:
             failed += 1
             state, message = "failed", str(exc)
@@ -3593,8 +3600,8 @@ def add_lyrics_style_flag(parser: argparse.ArgumentParser) -> None:
         dest="lyrics_style",
         choices=LYRICS_STYLES,
         default="plain",
-        help="plain: readable text in the lyrics tag (Apple Music). synced: timestamped LRC text for players "
-        "that scroll lyrics. MP3 files always get an embedded SYLT timing frame when timing is available.",
+        help="plain: clean lyrics tags. synced: also keep an .lrc file for compatible players. "
+        "MP3 files embed a SYLT frame whenever timing is available.",
     )
 
 
@@ -3666,7 +3673,7 @@ def create_parser() -> argparse.ArgumentParser:
     library.add_argument("--json-events", dest="json_events", action="store_true", help="Emit JSON progress events.")
     library.add_argument("--debug-log", action="store_true", help="Write verbose diagnostics to the log file.")
 
-    embed_lrc = subparsers.add_parser("embed-lrc", help="Embed existing .lrc sidecar lyrics into their audio files.")
+    embed_lrc = subparsers.add_parser("embed-lrc", help="Embed clean lyrics from .lrc files and preserve timing.")
     embed_lrc.add_argument("folders", nargs="+", help="Folders to scan.")
     embed_lrc.add_argument("--recursive", dest="recursive", action="store_true", default=True, help="Include subfolders.")
     embed_lrc.add_argument("--no-recursive", dest="recursive", action="store_false", help="Do not include subfolders.")
@@ -3691,6 +3698,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def run_download(args: argparse.Namespace) -> int:
     options = RunOptions.from_args(args)
+    if options.cookies_browser:
+        browser = options.cookies_browser
+        try:
+            with YoutubeDL({"cookiesfrombrowser": (browser,), "logger": LOG}) as ydl:
+                _ = ydl.cookiejar
+        except Exception as exc:
+            LOG.info("Could not load %s cookies: %s", browser, exc)
+            print(
+                f"Could not load {browser} browser cookies. Continuing without cookies for this run.",
+                file=sys.stderr,
+                flush=True,
+            )
+            options.cookies_browser = None
     options.ffmpeg_location = find_ffmpeg_location()
     options_output_dir.set(str(Path(args.output_dir).expanduser()))
 

@@ -1,32 +1,15 @@
-# Spotify Downloader 1.2.0
+# Spotify Downloader 1.2.1
 
-Linux and Windows desktop queues now survive application restarts. Recovered
-queues wait for Resume and skip completed files using the original links, folder
-and options. Closing an active download retains its queue; Stop discards it.
-Failed jobs remain recoverable, and successful completion clears saved state.
-Browser cookie selections are not persisted.
+- When a selected browser's cookies cannot be loaded, downloads report the
+  issue once and continue without cookies for that run. Some videos still
+  require a working signed-in browser.
+- Lyrics tags contain clean text. MP3 files keep word or line timing in an
+  embedded SYLT frame. Enable **Save .lrc for playback** to also save a
+  timed lyrics file for compatible players.
+- Use **Lyrics Tools → Remove Timestamps** to repair existing files. MP3s keep
+  embedded timing, and other formats keep timing in an .lrc file. Apple Music
+  displays custom lyrics for local files as plain text.
 
-Diagnostics records each automatic YouTube match's title, URL, duration and
-selection reason before downloading. Dependency checks now explain how to install
-FFmpeg and Node/Deno on the destination operating system, including Windows.
-These UI improvements apply to the Qt desktop application; the native Mac app
-receives the shared helper diagnostics and match events.
-
-A generated-media integration test exercises real yt-dlp transfer, FFmpeg MP3
-conversion, metadata tagging, manifest recording and completed-file skipping on
-all three native CI platforms. Queue recovery tests cover restart, failures,
-success, explicit stop and damaged settings.
-
-## Installation and limitations
-
-Extract the complete ZIP for your OS. Install FFmpeg and Node 22+ (or Deno 2+)
-separately and restart the application. On macOS: `brew install ffmpeg node`.
-The native Mac app requires macOS 14+ and the packaged Mac download supports Apple
-Silicon. Intel Macs can build from source. Linux/Windows bundles are unsigned;
-the Mac app is ad-hoc signed and is not Apple-notarized.
-
-The generated-media test validates the local pipeline, not YouTube authentication,
-live service availability or Apple Music access. Those still require a real user
-session. Matching remains automatic and heuristic; Spotify Preview does not use
-browser cookies or preselect YouTube uploads. Completed files survive interruption,
-but partial files may restart. See DESKTOP.md for queue recovery and setup details.
+Extract the ZIP for your operating system. The macOS ZIP supports Apple Silicon
+and requires macOS 14 or later. Install FFmpeg and Node 22+ (or Deno 2+)
+separately. See DESKTOP.md for setup details.

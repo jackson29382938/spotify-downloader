@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from concurrent.futures import wait as real_wait
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 import spotify_dl as dl
 
@@ -14,6 +14,28 @@ dl.YOUTUBE_GATE.min_spacing = 0
 
 # Forty silent MPEG-1 Layer III frames: small, but readable as real audio.
 SILENT_MP3 = (b"\xff\xfb\x90\x64" + b"\x00" * 413) * 40
+
+
+class BrowserCookieTests(unittest.TestCase):
+    def test_cookie_load_failure_falls_back_before_starting_download_workers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = dl.parse_args([
+                "download", "--cookies-browser", "chrome", "-o", tmp,
+                "https://open.spotify.com/track/abc123",
+            ])
+            stderr = io.StringIO()
+            with (
+                patch.object(dl.YoutubeDL, "cookiejar", new_callable=PropertyMock,
+                             side_effect=FileNotFoundError("missing cookie database")) as jar,
+                patch.object(dl, "load_preview_snapshot", return_value=dl.SpotifyCollection("Test", [], False)),
+                patch.object(dl, "download_collection", return_value=(0, 0, 0, [], Path(tmp))) as download,
+                patch.object(dl, "append_history"),
+                contextlib.redirect_stderr(stderr),
+            ):
+                self.assertEqual(dl.run_download(args), 0)
+            jar.assert_called_once()
+            self.assertIsNone(download.call_args.args[1].cookies_browser)
+            self.assertIn("Continuing without cookies for this run", stderr.getvalue())
 
 
 class SpotifyParsingTests(unittest.TestCase):
@@ -898,11 +920,11 @@ plain: |-
     def test_parse_lrc_expands_repeated_timestamps_and_skips_metadata(self):
         self.assertEqual(
             dl.parse_lrc(self.SYNCED),
-            [("First line", 1500), ("Chorus", 3000), ("Chorus", 10250)],
+            [("First line", 1500), ("\nChorus", 3000), ("\nChorus", 10250)],
         )
         self.assertEqual(dl.strip_lrc_timestamps(self.SYNCED), "First line\nChorus")
 
-    def test_lyrics_style_controls_standard_tag_text(self):
+    def test_lyrics_text_supports_display_and_lrc(self):
         lyrics = dl.Lyrics(plain=None, synced=self.SYNCED)
         self.assertEqual(lyrics.text("plain"), "First line\nChorus")
         self.assertEqual(lyrics.text("synced"), self.SYNCED)
@@ -959,11 +981,12 @@ plain: |-
         with tempfile.TemporaryDirectory() as tmp:
             audio = Path(tmp) / "song.mp3"
             audio.write_bytes(b"\x00" * 512)
-            self.assertTrue(dl.embed_lyrics(audio, dl.Lyrics(plain="First line\nChorus", synced=self.SYNCED)))
+            self.assertTrue(dl.embed_lyrics(audio, dl.Lyrics(synced=self.SYNCED), "synced"))
+            self.assertEqual(audio.with_suffix(".lrc").read_text(encoding="utf-8"), self.SYNCED)
 
             tags = ID3(str(audio))
             self.assertEqual(tags.getall("USLT")[0].text, "First line\nChorus")
-            self.assertEqual(tags.getall("SYLT")[0].text[0], ("First line", 1500))
+            self.assertEqual(tags.getall("SYLT")[0].text[:2], [("First line", 1500), ("\nChorus", 3000)])
             self.assertEqual(tags.version[:2], (2, 3))
 
     def test_embed_lrc_command_moves_sidecars_into_audio_files(self):
@@ -1088,14 +1111,15 @@ class MatchingReliabilityTests(unittest.TestCase):
 
 class CleanLyricsTests(unittest.TestCase):
     def test_timestamped_lyrics_become_plain_text_with_mp3_timing_kept(self):
-        from mutagen.id3 import ID3
+        from mutagen.id3 import ID3, USLT
 
         with tempfile.TemporaryDirectory() as tmp:
             audio = Path(tmp) / "song.mp3"
             audio.write_bytes(b"\x00" * 512)
             synced = "[00:42.92] Ooh yeah, ooh yeah\n[00:48.01] Rat-tailed Jimmy is a second-hand hood\n"
-            dl.embed_lyrics(audio, dl.Lyrics(synced=synced), "synced")
-            self.assertIn("[00:42.92]", ID3(str(audio)).getall("USLT")[0].text)
+            tags = ID3()
+            tags.add(USLT(encoding=1, lang="eng", text=synced))
+            tags.save(audio, v2_version=3)
 
             with contextlib.redirect_stdout(io.StringIO()):
                 code = dl.main(["clean-lyrics", tmp])

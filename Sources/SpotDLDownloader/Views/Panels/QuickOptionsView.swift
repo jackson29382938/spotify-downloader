@@ -79,7 +79,7 @@ struct QuickOptionsView: View {
                         Toggle("Lyrics", isOn: $searchLyrics)
                             .toggleStyle(.checkbox)
                             .fixedSize()
-                            .help("Embed lyrics and available timing inside each song. Style is in Settings > Lyrics; no extra .lrc file is created.")
+                            .help("Embed clean lyrics and MP3 timing. Settings > Lyrics controls whether to also save an .lrc file.")
 
                         AppleMusicPlaylistField()
 

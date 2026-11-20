@@ -34,9 +34,12 @@ def test_generated_media_download_conversion_tags_and_resume(tmp_path):
     url = f"http://127.0.0.1:{server.server_port}/tone.wav"
     candidate = {"id": "generated", "title": "Generated tone", "duration": 1, "webpage_url": url}
     track = dl.Track(name="Generated tone", artists="Test fixture", album="Owned synthetic audio", duration_ms=1000)
-    options = dl.RunOptions(lyrics=False, retries=0, json_events=True, ffmpeg_location=dl.find_ffmpeg_location())
+    timed = "[00:00.10] First line\n[00:00.60] Second line"
+    options = dl.RunOptions(lyrics_style="synced", retries=0, json_events=True,
+                            ffmpeg_location=dl.find_ffmpeg_location())
     try:
         with patch.object(dl, "find_youtube_candidate", return_value=(candidate, "controlled fixture")), \
+             patch.object(dl, "fetch_lyrics_payload", return_value=dl.Lyrics(synced=timed)), \
              patch.object(dl, "YOUTUBE_GATE", dl.YouTubeGate(min_spacing=0)), \
              patch.object(dl, "emit_json_event") as events:
             dl.STOP_EVENT.clear()
@@ -48,6 +51,9 @@ def test_generated_media_download_conversion_tags_and_resume(tmp_path):
             assert media.tags["TIT2"].text == ["Generated tone"]
             assert media.tags["TPE1"].text == ["Test fixture"]
             assert media.tags["TALB"].text == ["Owned synthetic audio"]
+            assert media.tags.getall("USLT")[0].text == "First line\nSecond line"
+            assert media.tags.getall("SYLT")[0].text == [("First line", 100), ("\nSecond line", 600)]
+            assert path.with_suffix(".lrc").read_text(encoding="utf-8") == timed
             selected = [call for call in events.call_args_list if call.args[1] == "match_selected"]
             assert selected[0].kwargs["candidate_url"] == url
             assert selected[0].kwargs["reason"] == "controlled fixture"

@@ -151,7 +151,7 @@ enum MatchFlexibility {
     }
 }
 
-/// How lyrics are written into the song's standard lyrics tag.
+/// Whether to also save an LRC file for timed playback.
 enum LyricsStyle: String, CaseIterable, Identifiable {
     case plain
     case synced
@@ -163,7 +163,7 @@ enum LyricsStyle: String, CaseIterable, Identifiable {
         case .plain:
             "Plain text"
         case .synced:
-            "Timed text inside song"
+            "Save .lrc for playback"
         }
     }
 
@@ -172,7 +172,7 @@ enum LyricsStyle: String, CaseIterable, Identifiable {
         case .plain:
             "Clean lyrics text for Apple Music. MP3s also keep word timing when LRCLib has it, or line timing otherwise, in an embedded SYLT frame. Apple Music does not animate timing for personal files."
         case .synced:
-            "Timestamped text inside the song, with word timing when LRCLib has it and line timing otherwise. Compatible players can scroll it. Apple Music shows the timestamp codes as text for personal files."
+            "Keep clean lyrics in the song and save an .lrc file for players that support timed lyrics. Keep both files together."
         }
     }
 }

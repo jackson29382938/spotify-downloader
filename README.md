@@ -148,18 +148,16 @@ keep concurrent downloads low.
 
 ## Lyrics
 
-Lyrics from LRCLib are written inside each song, not as separate files:
+The standard lyrics tag (MP3 `USLT`, M4A `©lyr`, FLAC/Ogg `LYRICS`) contains
+readable text. MP3 files also store word or line timing in a `SYLT` frame when
+LRCLib provides timing.
 
-- The standard lyrics tag (MP3 `USLT`, M4A `©lyr`, FLAC/Ogg `LYRICS`) gets
-  readable text that Apple Music and most players show.
-- MP3 files also get an embedded `SYLT` frame with word timing when LRCLib
-  provides it, falling back to line timing for other songs.
-- `--lyrics-style synced` stores enhanced word-timestamped text in the lyrics
-  tag when available, or line-timestamped text otherwise, for compatible players.
-- The Mac app creates no `.lrc` sidecar files. The command line tool retains
-  `--lrc` for people who explicitly need a separate file.
+Select **Save .lrc for playback** in the Mac app or use `--lyrics-style synced`
+to save timing alongside the song for players that read `.lrc` files. The CLI
+also accepts `--lrc`. Keep the audio and lyrics files together.
 
-Move existing `.lrc` files into their songs (and delete the `.lrc` files):
+Copy clean lyrics from existing `.lrc` files into their songs. The command keeps
+the sidecar when it is needed to preserve timing, or when passed `--keep-lrc`.
 
 ```bash
 python3 spotify_dl.py embed-lrc "$HOME/Downloads" "$HOME/Music"
@@ -168,7 +166,7 @@ python3 spotify_dl.py embed-lrc "$HOME/Downloads" "$HOME/Music"
 Apple Music only scrolls time-synced lyrics for songs from its own catalog;
 for your own files it shows the lyrics tag as plain text. If songs show
 `[00:42.92]` timestamps there, turn them back into clean text (MP3 files keep the
-timing in their `SYLT` frame):
+timing in their `SYLT` frame, and other formats keep it in an `.lrc` file):
 
 ```bash
 python3 spotify_dl.py clean-lyrics "$HOME/Downloads" "$HOME/Music"
